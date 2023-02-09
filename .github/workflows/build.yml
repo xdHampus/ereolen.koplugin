@@ -12,7 +12,8 @@ jobs:
         extra_nix_config: |
           access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
     - run: nix build
+    - run: mkdir tmp && cp -r result/* tmp/
     - uses: actions/upload-artifact@v3
       with:
         name: ereolen.koplugin
-        path: result/ereolen.koplugin
+        path: ./tmp
