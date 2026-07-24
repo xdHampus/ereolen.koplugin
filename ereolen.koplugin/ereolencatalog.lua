@@ -14,7 +14,6 @@ local Screen = require("device").screen
 local T = require("ffi/util").template
 local Button = require("ui/widget/button")
 
-local EReolenWrapper = require("ereolenwrapper")
 local EReolenBrowser = require("ereolenbrowser")
 local EReolenSearch =require("ereolensearch")
 local EReolenAccount =require("ereolenaccount")
@@ -70,6 +69,11 @@ function EReolenCatalog:init()
         width = Screen:getWidth(),
         background = Blitbuffer.COLOR_WHITE,
     }
+    -- Five buttons of equal width, with room for each one's margins. Sizing the
+    -- close button separately made it 12px wide on a 600px screen, and once the
+    -- margins came off, TextWidget refused the non-positive text width.
+    local tab_margin = 2
+    local tab_button_width = math.floor(Screen:getWidth() / 5) - tab_margin * 2
     self.bottom_tab = FrameContainer:new{
         padding = 0,
         bordersize = 0,
@@ -79,8 +83,8 @@ function EReolenCatalog:init()
         HorizontalGroup:new{
             Button:new{
                 text = _("FRONT"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
+                width = tab_button_width,
+                margin = tab_margin,
                 callback = function()
                     self.active_page[1] = ereolen_browser
                     UIManager:setDirty(self, function()
@@ -90,8 +94,8 @@ function EReolenCatalog:init()
             },    
             Button:new{
                 text = _("SEARCH"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
+                width = tab_button_width,
+                margin = tab_margin,
                 callback = function()
                     self.active_page[1] = ereolen_search
                     UIManager:setDirty(self, function()
@@ -101,13 +105,13 @@ function EReolenCatalog:init()
             },    
             Button:new{
                 text = _("READ"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
+                width = tab_button_width,
+                margin = tab_margin,
             },    
             Button:new{
                 text = _("ACCOUNT"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
+                width = tab_button_width,
+                margin = tab_margin,
                 callback = function()
                     self.active_page[1] = ereolen_account
                     UIManager:setDirty(self, function()
@@ -116,9 +120,9 @@ function EReolenCatalog:init()
                 end,
             },   
             Button:new{
-                text = _("Q"),
-                width = Screen:getWidth() / (5*10),
-                margin = 4,
+                text = _("CLOSE"),
+                width = tab_button_width,
+                margin = tab_margin,
                 callback = function() return self:onClose() end,
             },    
         },
@@ -137,7 +141,6 @@ function EReolenCatalog:init()
 end
 
 function EReolenCatalog:onShow()
-    EReolenWrapper:parse()
     UIManager:setDirty(self, function()
         return "ui", self[1].dimen
     end)

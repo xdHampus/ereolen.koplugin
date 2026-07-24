@@ -3,29 +3,29 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    nixpkgs-master.url = "github:NixOS/nixpkgs/master";
     ereolenWrapper-flake.url = "github:xdHampus/ereolenWrapper/main";
     utils.url = "github:numtide/flake-utils";
-    utils.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, nixpkgs-master, ereolenWrapper-flake, utils, ... }@inputs:
+  outputs = { self, nixpkgs, ereolenWrapper-flake, utils, ... }@inputs:
     utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs { config.allowUnfree = true; inherit system; };
-        pkgsUnstable = import nixpkgs-master { config.allowUnfree = true; inherit system; };       
+        pkgs = import nixpkgs { inherit system; };
+        ereolenWrapperLua = ereolenWrapper-flake.packages.${system}.ereolenWrapperLua;
         ereolen-kopluginDrv = pkgs.callPackage ./default.nix {
-			ereolenWrapperLua = ereolenWrapper-flake.packages.${system}.ereolenWrapperLua;
+          inherit ereolenWrapperLua;
         };
       in {
-        devShell = pkgs.mkShell rec {
+        devShells.default = pkgs.mkShell rec {
           name = "ereolen.koplugin";
-          packages = with pkgs; [
-			ereolenWrapper-flake.packages.${system}.ereolenWrapperLua
+          packages = [
+            ereolenWrapperLua
+            pkgs.lua5_1
+            pkgs.koreader
           ];
         };
-		defaultPackage = ereolen-kopluginDrv;
         packages = {
+          default = ereolen-kopluginDrv;
           ereolen-koplugin = ereolen-kopluginDrv;
         };
       });
