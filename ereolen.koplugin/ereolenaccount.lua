@@ -100,6 +100,27 @@ function EReolenAccount:showPage(title, item_table, on_back)
     Menu.init(self)
 end
 
+--- Open an account-list entry in the item view.
+-- The batch getRecords lookup can miss, so fall back to getProduct for the one
+-- record rather than leaving the row dead.
+function EReolenAccount:openEntry(entry, record, label, on_back, fallback)
+    local single = record
+    if not single then
+        single = EReolenWrapper:call(function(token)
+            return ereol.Item.getProduct(entry.loanIdentifier.identifier, token)
+        end)
+    end
+    if single then
+        EReolenItem.show(self, single, on_back)
+    elseif fallback then
+        fallback()
+    else
+        UIManager:show(InfoMessage:new{
+            text = T(_("No details available for ISBN %1."), entry.loanIdentifier.isbn),
+        })
+    end
+end
+
 --- Fetch through EReolenWrapper:call and show the error page on failure.
 -- Returns the data, or nil when the page has already been rendered.
 function EReolenAccount:fetch(title, fn)
@@ -135,20 +156,10 @@ function EReolenAccount:showLoans()
                 text = T(_("%1 (expires %2)"), label, formatDate(loan.expireDate)),
                 deletable = false, editable = false,
                 callback = function()
-                    -- The batch lookup can miss; getProduct is the single-record
-                    -- fallback so the loan still opens the full item view.
-                    local single = record
-                    if not single then
-                        single = EReolenWrapper:call(function(token)
-                            return ereol.Item.getProduct(loan.loanIdentifier.identifier, token)
-                        end)
-                    end
-                    if single then
-                        EReolenItem.show(self, single, function() self:showLoans() end)
-                    else
+                    self:openEntry(loan, record, label,
+                        function() self:showLoans() end,
                         -- Still no metadata; the download is the point anyway.
-                        EReolenDownload.loan(loan, label)
-                    end
+                        function() EReolenDownload.loan(loan, label) end)
                 end,
             })
         end
@@ -178,9 +189,9 @@ function EReolenAccount:showReservations()
                 text = T(_("%1 (%2)"),
                     describe(record, reservation.loanIdentifier), reservation.status),
                 deletable = false, editable = false,
-                callback = record and function()
-                    EReolenItem.show(self, record, function() self:showReservations() end)
-                end or nil,
+                callback = function()
+                    self:openEntry(reservation, record, nil, function() self:showReservations() end)
+                end,
             })
         end
     end
@@ -208,9 +219,9 @@ function EReolenAccount:showChecklist()
             table.insert(item_table, {
                 text = describe(record, entry.loanIdentifier),
                 deletable = false, editable = false,
-                callback = record and function()
-                    EReolenItem.show(self, record, function() self:showChecklist() end)
-                end or nil,
+                callback = function()
+                    self:openEntry(entry, record, nil, function() self:showChecklist() end)
+                end,
             })
         end
     end

@@ -9,6 +9,7 @@ showPage(title, item_table, on_back) -- see EReolenAccount:showPage.
 
 local ConfirmBox = require("ui/widget/confirmbox")
 local ImageViewer = require("ui/widget/imageviewer")
+local MultiInputDialog = require("ui/widget/multiinputdialog")
 local InfoMessage = require("ui/widget/infomessage")
 local NetworkMgr = require("ui/network/manager")
 local TextViewer = require("ui/widget/textviewer")
@@ -70,14 +71,15 @@ local function blurbOf(record)
     return (text:gsub("<br%s*/?>", "\n"):gsub("<[^>]->", ""))
 end
 
---- Look up this title's loan status and whether it is already borrowed.
--- Returns status (string or nil) and the LoanActive if one exists.
+--- What this title's state is for this account.
+-- Returns status (from getLoanStatuses) plus the matching loan, checklist entry
+-- and reservation if any.
 --
 -- Matches on ISBN, not identifier: a search result's identifier carries an extra
--- source field that getLoans' does not, so the two never compare equal for the
--- same book. e.g. {"i":"978…","s":"870970-basis:48341624","c":"ereolen"} from
--- search vs {"i":"978…","c":"ereolen"} from getLoans. The ISBN is stable.
-local function loanState(record)
+-- source field that the account lists' identifiers do not. e.g.
+-- {"i":"978…","s":"870970-basis:48341624","c":"ereolen"} from search versus
+-- {"i":"978…","c":"ereolen"} from getLoans. The ISBN is stable.
+local function itemState(record)
     local identifier = record.loanIdentifier.identifier
     local isbn = record.loanIdentifier.isbn
 
@@ -87,28 +89,17 @@ local function loanState(record)
     end)
     if statuses then status = statuses[identifier] end
 
-    local existing
-    local loans = EReolenWrapper:call(function(token)
-        return ereol.Profile.getLoans(token)
-    end)
-    if loans then
-        for i = 1, #loans do
-            local li = loans[i].loanIdentifier
-            if (isbn and isbn ~= "" and li.isbn == isbn) or li.identifier == identifier then
-                existing = loans[i]
-                break
-            end
-        end
-    end
-    return status, existing
+    local lists = EReolenWrapper:profileLists()
+    return status,
+        EReolenWrapper.findByIsbn(lists.loans, isbn, identifier),
+        EReolenWrapper.findByIsbn(lists.checklist, isbn, identifier),
+        EReolenWrapper.findByIsbn(lists.reservations, isbn, identifier)
 end
 
 --- How many of the library's concurrent-loan slots are in use.
 -- Returns used, max. max is nil when the profile cannot be read.
 local function quota()
-    local loans = EReolenWrapper:call(function(token)
-        return ereol.Profile.getLoans(token)
-    end)
+    local loans = EReolenWrapper:profileLists().loans
     local used = loans and #loans or nil
 
     local library = EReolenWrapper:getLibrary()
@@ -152,6 +143,7 @@ function EReolenItem.borrow(host, record, refresh)
                     })
                     return
                 end
+                EReolenWrapper:invalidateProfile()
                 UIManager:show(InfoMessage:new{
                     text = T(_("Borrowed “%1”."), label),
                     timeout = 2,
@@ -160,6 +152,72 @@ function EReolenItem.borrow(host, record, refresh)
             end)
         end,
     })
+end
+
+--- Place a hold. addReservation takes an email and phone, and the app likewise
+-- refuses to offer reserving until the user has both on file.
+function EReolenItem.reserve(record, on_done)
+    local identifier = record.loanIdentifier.identifier
+    local email, phone = EReolenWrapper:getContact()
+
+    local function send(mail, tel)
+        NetworkMgr:runWhenOnline(function()
+            local ok, err = EReolenWrapper:call(function(token)
+                return ereol.Profile.addReservation(identifier, mail, tel, token)
+            end)
+            if not ok then
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Could not reserve “%1”:\n%2"), record.title, err),
+                })
+                return
+            end
+            EReolenWrapper:saveContact(mail, tel)
+            EReolenWrapper:invalidateProfile()
+            UIManager:show(InfoMessage:new{
+                text = T(_("Reserved “%1”."), record.title),
+                timeout = 2,
+            })
+            if on_done then on_done() end
+        end)
+    end
+
+    local dialog
+    dialog = MultiInputDialog:new{
+        title = T(_("Reserve “%1”"), record.title),
+        fields = {
+            { text = email or "", hint = _("Email") },
+            { text = phone or "", hint = _("Phone") },
+        },
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        dialog:onClose()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Reserve"),
+                    callback = function()
+                        local fields = dialog:getFields()
+                        dialog:onClose()
+                        UIManager:close(dialog)
+                        if fields[1] == "" or fields[2] == "" then
+                            UIManager:show(InfoMessage:new{
+                                text = _("eReolen needs both an email address and a phone number to reserve a title."),
+                            })
+                            return
+                        end
+                        send(fields[1], fields[2])
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 --- PageResult.data is a list of collections, each a list of Record.
@@ -241,7 +299,7 @@ end
 --- Renders `record` into `host`. `on_back` returns to whatever came before.
 function EReolenItem.show(host, record, on_back)
     local identifier = record.loanIdentifier.identifier
-    local status, existing = loanState(record)
+    local status, existing, checklisted, reserved = itemState(record)
 
     local item_table = {}
     local function row(text, callback)
@@ -365,6 +423,64 @@ function EReolenItem.show(host, record, on_back)
     end)
 
     local refresh = back_here
+
+    -- Want-to-read list.
+    if checklisted then
+        row(_("Remove from want-to-read"), function()
+            NetworkMgr:runWhenOnline(function()
+                local ok, err = EReolenWrapper:call(function(token)
+                    return ereol.Profile.removeFromCheckList({checklisted.loanIdentifier.identifier}, token)
+                end)
+                if not ok then
+                    UIManager:show(InfoMessage:new{ text = err })
+                    return
+                end
+                EReolenWrapper:invalidateProfile()
+                UIManager:show(InfoMessage:new{ text = _("Removed from your want-to-read list."), timeout = 2 })
+                back_here()
+            end)
+        end)
+    else
+        row(_("Add to want-to-read"), function()
+            NetworkMgr:runWhenOnline(function()
+                local ok, err = EReolenWrapper:call(function(token)
+                    return ereol.Profile.addToCheckList(identifier, token)
+                end)
+                if not ok then
+                    UIManager:show(InfoMessage:new{ text = err })
+                    return
+                end
+                EReolenWrapper:invalidateProfile()
+                UIManager:show(InfoMessage:new{ text = _("Added to your want-to-read list."), timeout = 2 })
+                back_here()
+            end)
+        end)
+    end
+
+    -- Reservations: only meaningful when the title cannot be borrowed now.
+    if reserved then
+        row(T(_("Reserved (%1) — tap to cancel"), reserved.status), function()
+            UIManager:show(ConfirmBox:new{
+                text = T(_("Cancel your reservation of “%1”?"), record.title),
+                ok_text = _("Cancel reservation"),
+                ok_callback = function()
+                    NetworkMgr:runWhenOnline(function()
+                        local ok, err = EReolenWrapper:call(function(token)
+                            return ereol.Profile.removeReservations({reserved.loanIdentifier.identifier}, token)
+                        end)
+                        if not ok then
+                            UIManager:show(InfoMessage:new{ text = err })
+                            return
+                        end
+                        EReolenWrapper:invalidateProfile()
+                        back_here()
+                    end)
+                end,
+            })
+        end)
+    elseif not existing and status and status ~= STATUS_LOANABLE then
+        row(_("Reserve"), function() EReolenItem.reserve(record, back_here) end)
+    end
 
     if existing then
         row(T(_("Borrowed — expires %1"), formatDate(existing.expireDate)))

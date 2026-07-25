@@ -171,6 +171,56 @@ function EReolenWrapper:logout()
     self.token = nil
 end
 
+--- Email and phone, which addReservation requires. Stored beside the card.
+function EReolenWrapper:getContact()
+    local account = self:getAccount() or {}
+    return account.email, account.phone
+end
+
+function EReolenWrapper:saveContact(email, phone)
+    local account = self:getAccount() or {}
+    account.email = email
+    account.phone = phone
+    -- Keep the live token: this is not a credential change.
+    local token = self.token
+    self:saveAccount(account)
+    self.token = token
+end
+
+--- The three account-wide lists, memoised.
+-- An item view wants to know whether a title is on loan, on the want-to-read
+-- list and reserved. Fetching all three every time an item opens is three round
+-- trips per tap, so they are cached until something mutates them.
+function EReolenWrapper:profileLists(force)
+    if self.profile_cache and not force then return self.profile_cache end
+
+    local lists = {}
+    lists.loans = self:call(function(token) return ereol.Profile.getLoans(token) end) or {}
+    lists.checklist = self:call(function(token) return ereol.Profile.getCheckList(token) end) or {}
+    lists.reservations = self:call(function(token) return ereol.Profile.getReservations(token) end) or {}
+
+    self.profile_cache = lists
+    return lists
+end
+
+function EReolenWrapper:invalidateProfile()
+    self.profile_cache = nil
+end
+
+--- Find an entry for `isbn` in one of those lists.
+-- Matches on ISBN because a search result's identifier carries an extra source
+-- field that the account lists' identifiers do not -- see ereolenitem.lua.
+function EReolenWrapper.findByIsbn(list, isbn, identifier)
+    if not list then return nil end
+    for i = 1, #list do
+        local li = list[i].loanIdentifier
+        if (isbn and isbn ~= "" and li.isbn == isbn) or li.identifier == identifier then
+            return list[i]
+        end
+    end
+    return nil
+end
+
 --- Resolve identifiers to Records in one getRecordsByIdentifiers call.
 -- Returns a map of identifier -> Record. Empty when the lookup fails: titles
 -- are a nicety and the caller can still fall back to the ISBN.
