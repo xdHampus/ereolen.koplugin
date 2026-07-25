@@ -71,6 +71,44 @@ function EReolenSearch:genStartStateItemTable()
     return item_table
 end
 
+--- Search typeahead. getSuggestions needs no session, so this works signed out.
+function EReolenSearch:showSuggestions(prefix)
+    if prefix == nil or prefix == "" then
+        UIManager:show(InfoMessage:new{ text = _("Type something to get suggestions for.") })
+        return
+    end
+    NetworkMgr:runWhenOnline(function()
+        local suggestions, err = EReolenWrapper:call(function(token)
+            return ereol.Item.getSuggestions(prefix, token)
+        end)
+        if not suggestions then
+            UIManager:show(InfoMessage:new{ text = err })
+            return
+        end
+
+        local item_table = {}
+        if #suggestions == 0 then
+            table.insert(item_table, {
+                text = _("No suggestions"),
+                deletable = false, editable = false,
+            })
+        end
+        local seen = {}
+        for _, suggestion in ipairs(suggestions) do
+            local text = suggestion.suggestion
+            if text ~= "" and not seen[text] then
+                seen[text] = true
+                table.insert(item_table, {
+                    text = text,
+                    deletable = false, editable = false,
+                    callback = function() self:runSearch(text, 0) end,
+                })
+            end
+        end
+        self:showPage(T(_("Suggestions for “%1”"), prefix), item_table)
+    end)
+end
+
 --- The app's curated categories, from Firebase rather than the RPC API.
 function EReolenSearch:showCategories()
     NetworkMgr:runWhenOnline(function()
@@ -142,6 +180,15 @@ function EReolenSearch:displayNewSearch(default_text)
                     callback = function()
                         self.search_input:onClose()
                         UIManager:close(self.search_input)
+                    end,
+                },
+                {
+                    text = _("Suggest"),
+                    callback = function()
+                        local prefix = self.search_input:getInputText()
+                        self.search_input:onClose()
+                        UIManager:close(self.search_input)
+                        self:showSuggestions(prefix)
                     end,
                 },
                 {
@@ -230,6 +277,14 @@ function EReolenSearch:showResults(query, offset, page, label)
             text = _("No results"),
             deletable = false, editable = false,
         })
+        -- A typed query that found nothing is exactly when suggestions help.
+        if not label then
+            table.insert(item_table, {
+                text = T(_("Suggestions for “%1”"), query),
+                deletable = false, editable = false,
+                callback = function() self:showSuggestions(query) end,
+            })
+        end
     end
 
     for _, record in ipairs(records) do

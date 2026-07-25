@@ -397,6 +397,34 @@ function EReolenItem.show(host, record, on_back)
         end)
     end, back_here)
 
+    row(_("About the author"), function()
+        NetworkMgr:runWhenOnline(function()
+            local about, err = EReolenWrapper:call(function(token)
+                return ereol.Item.getAboutCreators(identifier, token)
+            end)
+            if not about then
+                UIManager:show(InfoMessage:new{ text = err })
+                return
+            end
+            if #about == 0 then
+                UIManager:show(InfoMessage:new{ text = _("No author portrait for this title.") })
+                return
+            end
+            local parts = {}
+            for _, entry in ipairs(about) do
+                local block = entry.creator
+                if entry.source ~= "" then block = block .. " (" .. entry.source .. ")" end
+                block = block .. "\n" .. entry.subTitle
+                if entry.url ~= "" then block = block .. "\n" .. entry.url end
+                table.insert(parts, block)
+            end
+            UIManager:show(TextViewer:new{
+                title = _("About the author"),
+                text = table.concat(parts, "\n\n"),
+            })
+        end)
+    end)
+
     row(_("Reviews"), function()
         NetworkMgr:runWhenOnline(function()
             local reviews, err = EReolenWrapper:call(function(token)
