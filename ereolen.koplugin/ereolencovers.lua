@@ -75,12 +75,21 @@ function EReolenCovers:fetch(url)
     local data = table.concat(sink)
     if data == "" then return nil, "empty response" end
 
-    -- Scale to the screen so a 1500px cover does not sit in memory full size.
-    local bb = RenderImage:renderImageData(data, #data, false, Screen:getWidth(), Screen:getHeight())
+    local bb = RenderImage:renderImageData(data, #data, false)
     if not bb then
         return nil, "could not decode " .. tostring(headers and headers["content-type"])
     end
-    return bb
+
+    -- Cap at the screen so a 1500px cover does not sit in memory full size.
+    -- Do not hand the target box straight to renderImageData: scaleBlitBuffer
+    -- stretches to exactly the width and height given, so passing the screen
+    -- size distorts every cover and upscales the small ones -- PubHub's are
+    -- around 500x800, well under a Libra's 1264x1680.
+    local scale = math.min(Screen:getWidth() / bb:getWidth(),
+                           Screen:getHeight() / bb:getHeight())
+    if scale >= 1 then return bb end
+    return RenderImage:scaleBlitBuffer(bb,
+        math.floor(bb:getWidth() * scale), math.floor(bb:getHeight() * scale))
 end
 
 return EReolenCovers
