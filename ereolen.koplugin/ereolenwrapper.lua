@@ -10,11 +10,31 @@ Credentials live in G_reader_settings. The session token does not: it is a
 userdata handle, so it is kept in memory and re-created on demand.
 ]]
 
+local DataStorage = require("datastorage")
 local logger = require("logger")
+local lfs = require("libs/libkoreader-lfs")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
 require("libereolenwrapper")
+
+-- A device build of the wrapper links a static libcurl, which bakes in one CA
+-- path at build time and -- unlike the curl command-line tool -- ignores
+-- $CURL_CA_BUNDLE. Point it at the bundle KOReader ships, wherever KOReader
+-- happens to be installed. Leaving it unset on a desktop keeps the system
+-- trust store, which is what a desktop wants.
+local function setCaBundle()
+    if not ereol.ApiEnv.setCaBundle then return end -- older wrapper build
+    -- getFullDataDir, not getDataDir: on a Kobo the latter is "." and libcurl
+    -- would resolve it against whatever the cwd is when a request runs.
+    local path = DataStorage:getFullDataDir() .. "/data/ca-bundle.crt"
+    if lfs.attributes(path, "mode") ~= "file" then
+        logger.dbg("eReolen: no CA bundle at", path, "- using the TLS default")
+        return
+    end
+    ereol.ApiEnv.setCaBundle(path)
+end
+setCaBundle()
 
 local SETTINGS_KEY = "ereolen_account"
 
