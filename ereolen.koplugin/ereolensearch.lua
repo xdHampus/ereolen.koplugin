@@ -133,11 +133,18 @@ function EReolenSearch:showCategories()
         end
 
         local item_table = {}
-        for _, category in ipairs(data.categories) do
-            local label = category.title
-            if category.count then label = T("%1 (%2)", label, category.count) end
+        -- Not `for _, category`: that shadows gettext's _ inside the loop.
+        for i = 1, #data.categories do
+            local category = data.categories[i]
+            -- Each category ships a representative cover, so this draws as a
+            -- grid of pictures rather than a wall of Danish nouns.
             table.insert(item_table, {
-                text = label,
+                cover_url = category.cover,
+                text = category.title,
+                caption = category.count
+                    and (category.title .. "\n" .. T(_("%1 titles"), category.count))
+                    or category.title,
+                subtitle = category.count and T(_("%1 titles"), category.count) or nil,
                 deletable = false, editable = false,
                 callback = function() self:showCategory(category) end,
             })
@@ -159,7 +166,11 @@ function EReolenSearch:showCategory(category)
         })
     end
 
-    for _, shelf in ipairs(category.shelves or {}) do
+    -- Not `for _, shelf`: the loop variable would shadow gettext's _, and the
+    -- fallback below calls it. compact() leaves title nil for an unnamed shelf,
+    -- so that path is reachable.
+    for i = 1, #(category.shelves or {}) do
+        local shelf = category.shelves[i]
         local title = shelf.title or _("Untitled shelf")
         table.insert(item_table, {
             text = title,

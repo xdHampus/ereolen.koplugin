@@ -127,8 +127,28 @@ function EReolenBrowser:showShelf(shelf)
 end
 
 --- Same contract as the other tabs, so EReolenItem can render into us.
+--- Swap the title bar's left button for the page being shown: recommendations
+--- on the shelves, the grid/list toggle anywhere that lists books.
+function EReolenBrowser:setLeftButton(mode)
+    if mode == "toggle" then
+        self.onLeftButtonTap = function() self:toggleViewMode() end
+        if self.title_bar and self.title_bar.setLeftIcon then
+            self.title_bar:setLeftIcon("appbar.pageview")
+        end
+    else
+        self.onLeftButtonTap = function() self:showRecommendations() end
+        if self.title_bar and self.title_bar.setLeftIcon then
+            self.title_bar:setLeftIcon("star.empty")
+        end
+    end
+end
+
 function EReolenBrowser:showPage(title, item_table, on_back)
-    self:showRecords(title, item_table, on_back or function() self:showStart() end)
+    self:setLeftButton("toggle")
+    self:showRecords(title, item_table, on_back or function()
+        self:setLeftButton("star")
+        self:showStart()
+    end)
 end
 
 function EReolenBrowser:showRecommendations()
@@ -147,6 +167,7 @@ end
 
 --- Back to the front page without re-running Menu.init on a live widget.
 function EReolenBrowser:showStart()
+    self:setLeftButton("star")
     self:switchItemTable(_("eReolen"), self:genItemTable())
 end
 

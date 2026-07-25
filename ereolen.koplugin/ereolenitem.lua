@@ -17,6 +17,9 @@ local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
+local Screen = require("device").screen
+local Size = require("ui/size")
+local EReolenItemPage = require("ereolenitempage")
 local EReolenCovers = require("ereolencovers")
 local EReolenView = require("ereolenview")
 local EReolenDownload = require("ereolendownload")
@@ -301,105 +304,164 @@ function EReolenItem.show(host, record, on_back)
     local identifier = record.loanIdentifier.identifier
     local status, existing, checklisted, reserved = itemState(record)
 
-    local item_table = {}
-    local function row(text, callback)
-        table.insert(item_table, {
-            text = text,
-            deletable = false, editable = false,
-            callback = callback,
-        })
-    end
+    -- Actions are buttons; sections are the quieter list underneath.
+    local actions, sections = {}, {}
+    local function action(text, callback) table.insert(actions, { text = text, callback = callback }) end
+    local function section(text, callback) table.insert(sections, { text = text, callback = callback }) end
 
-    local creators = joinList(dedupeNames(record.creators))
-    if creators then row(T(_("By %1"), creators)) end
+    local reopen = function() EReolenItem.show(host, record, on_back) end
 
+    ------------------------------------------------------------------- header
     local facts = {}
     if record.recordType then table.insert(facts, record.recordType) end
     if record.year then table.insert(facts, record.year) end
-    if record.language then table.insert(facts, record.language) end
+    if record.language and record.language ~= "" then table.insert(facts, record.language) end
     if record.publisher and record.publisher ~= "" then table.insert(facts, record.publisher) end
-    if #facts > 0 then row(table.concat(facts, " · ")) end
 
-    local series = joinList(dedupeNames(record.series))
-    if series then row(T(_("Series: %1"), series)) end
-
-    -- Resolved up front so the row is only offered when a cover actually exists.
-    local cover_url = EReolenCovers:urlFor(identifier)
-    if cover_url then
-        row(_("Cover"), function() showCover(record, cover_url) end)
+    local status_text
+    if existing then
+        status_text = T(_("Borrowed — expires %1"), formatDate(existing.expireDate))
+    elseif reserved then
+        status_text = T(_("Reserved (%1)"), reserved.status)
+    elseif status == STATUS_LOANABLE then
+        status_text = _("Available to borrow")
+    elseif status then
+        status_text = T(_("Not available (%1)"), status)
     end
 
-    local blurb = blurbOf(record)
-    if blurb then
-        local preview = blurb:gsub("%s+", " ")
-        if #preview > 90 then preview = preview:sub(1, 90) .. "…" end
-        row(preview, function()
-            UIManager:show(TextViewer:new{
-                title = record.title,
-                text = blurb,
-            })
+    ------------------------------------------------------------------ actions
+    if existing then
+        action(_("Download"), function() EReolenDownload.loan(existing, record.title) end)
+    elseif status == STATUS_LOANABLE then
+        action(_("Borrow"), function() EReolenItem.borrow(host, record, reopen) end)
+    end
+
+    if checklisted then
+        action(_("Remove from want-to-read"), function()
+            NetworkMgr:runWhenOnline(function()
+                local ok, err = EReolenWrapper:call(function(token)
+                    return ereol.Profile.removeFromCheckList({checklisted.loanIdentifier.identifier}, token)
+                end)
+                if not ok then
+                    UIManager:show(InfoMessage:new{ text = err })
+                    return
+                end
+                EReolenWrapper:invalidateProfile()
+                UIManager:show(InfoMessage:new{ text = _("Removed from your want-to-read list."), timeout = 2 })
+                reopen()
+            end)
+        end)
+    else
+        action(_("Want to read"), function()
+            NetworkMgr:runWhenOnline(function()
+                local ok, err = EReolenWrapper:call(function(token)
+                    return ereol.Profile.addToCheckList(identifier, token)
+                end)
+                if not ok then
+                    UIManager:show(InfoMessage:new{ text = err })
+                    return
+                end
+                EReolenWrapper:invalidateProfile()
+                UIManager:show(InfoMessage:new{ text = _("Added to your want-to-read list."), timeout = 2 })
+                reopen()
+            end)
         end)
     end
 
-    local back_here = function() EReolenItem.show(host, record, on_back) end
+    if reserved then
+        action(_("Cancel reservation"), function()
+            UIManager:show(ConfirmBox:new{
+                text = T(_("Cancel your reservation of “%1”?"), record.title),
+                ok_text = _("Cancel reservation"),
+                ok_callback = function()
+                    NetworkMgr:runWhenOnline(function()
+                        local ok, err = EReolenWrapper:call(function(token)
+                            return ereol.Profile.removeReservations({reserved.loanIdentifier.identifier}, token)
+                        end)
+                        if not ok then
+                            UIManager:show(InfoMessage:new{ text = err })
+                            return
+                        end
+                        EReolenWrapper:invalidateProfile()
+                        reopen()
+                    end)
+                end,
+            })
+        end)
+    elseif not existing and status and status ~= STATUS_LOANABLE then
+        action(_("Reserve"), function() EReolenItem.reserve(record, reopen) end)
+    end
+
+    ----------------------------------------------------------------- sections
+    local cover_url = EReolenCovers:urlFor(identifier)
+    if cover_url then
+        section(_("View cover full size"), function() showCover(record, cover_url) end)
+    end
+
     local settings = ereol.QuerySettings()
     -- endIndex is a count, not an end offset: 20 related titles is plenty for
-    -- a row you tap out of curiosity.
+    -- a section someone taps out of curiosity.
     settings.startIndex = 0
     settings.endIndex = 20
 
-    -- Same title in another format: this is the ebook <-> audiobook switch.
-    relatedRow(host, row, _("Other formats of this title"), record.title, function()
+    local function relatedSection(label, page_title, fetch)
+        section(label, function()
+            NetworkMgr:runWhenOnline(function()
+                local records, err = fetch()
+                if not records then
+                    EReolenItem.showRecordList(host, page_title, {}, on_back, err)
+                    return
+                end
+                EReolenItem.showRecordList(host, page_title, records, on_back)
+            end)
+        end)
+    end
+
+    relatedSection(_("Other formats of this title"), _("Other formats"), function()
         local others, err = EReolenWrapper:callAllowEmpty(function(token)
             return ereol.Item.getOthersOfSameTitle(identifier, token)
         end)
         if not others then return nil, err end
-        -- Drop the edition we are already looking at.
-        local out = {}
-        for _, r in ipairs(others) do
-            if r.loanIdentifier.identifier ~= identifier then table.insert(out, r) end
-        end
-        return out
-    end, back_here)
+        return others
+    end)
 
     local creator = record.creators and record.creators[1]
     if creator then
-        relatedRow(host, row, T(_("More by %1"), creator), creator, function()
+        relatedSection(T(_("More by %1"), creator), creator, function()
             local page, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getMoreOfSameCreator(identifier, token, settings)
             end)
             if not page then return nil, err end
             return flattenPage(page)
-        end, back_here)
+        end)
     end
 
     if record.series and #record.series > 0 then
-        relatedRow(host, row, T(_("More in %1"), record.series[1]), record.series[1], function()
+        relatedSection(T(_("More in %1"), record.series[1]), record.series[1], function()
             local page, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getMoreInSameSeries(identifier, token, settings)
             end)
             if not page then return nil, err end
             return flattenPage(page)
-        end, back_here)
+        end)
     end
 
-    relatedRow(host, row, _("More in this genre"), _("Same genre"), function()
+    relatedSection(_("More in this genre"), _("Same genre"), function()
         local page, err = EReolenWrapper:callAllowEmpty(function(token)
             return ereol.Item.getMoreOfSameGenre(identifier, token, settings)
         end)
         if not page then return nil, err end
         return flattenPage(page)
-    end, back_here)
+    end)
 
-    relatedRow(host, row, _("Similar titles"), _("Similar titles"), function()
+    relatedSection(_("Similar titles"), _("Similar titles"), function()
         return EReolenWrapper:callAllowEmpty(function(token)
-            -- Note: this method rejects an 8th param, so the wrapper strips
-            -- facets from the settings it is given.
+            -- This method rejects an 8th param, so the wrapper strips facets.
             return ereol.Item.getSomethingSimilar(identifier, token, settings)
         end)
-    end, back_here)
+    end)
 
-    row(_("About the author"), function()
+    section(_("About the author"), function()
         NetworkMgr:runWhenOnline(function()
             local about, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getAboutCreators(identifier, token)
@@ -409,7 +471,7 @@ function EReolenItem.show(host, record, on_back)
                 return
             end
             if #about == 0 then
-                UIManager:show(InfoMessage:new{ text = _("No author portrait for this title.") })
+                UIManager:show(InfoMessage:new{ text = _("Nothing about this author.") })
                 return
             end
             local parts = {}
@@ -427,7 +489,7 @@ function EReolenItem.show(host, record, on_back)
         end)
     end)
 
-    row(_("Reviews"), function()
+    section(_("Reviews"), function()
         NetworkMgr:runWhenOnline(function()
             local reviews, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getReviews(identifier, token)
@@ -452,82 +514,30 @@ function EReolenItem.show(host, record, on_back)
         end)
     end)
 
-    local refresh = back_here
-
-    -- Want-to-read list.
-    if checklisted then
-        row(_("Remove from want-to-read"), function()
-            NetworkMgr:runWhenOnline(function()
-                local ok, err = EReolenWrapper:call(function(token)
-                    return ereol.Profile.removeFromCheckList({checklisted.loanIdentifier.identifier}, token)
-                end)
-                if not ok then
-                    UIManager:show(InfoMessage:new{ text = err })
-                    return
-                end
-                EReolenWrapper:invalidateProfile()
-                UIManager:show(InfoMessage:new{ text = _("Removed from your want-to-read list."), timeout = 2 })
-                back_here()
-            end)
-        end)
-    else
-        row(_("Add to want-to-read"), function()
-            NetworkMgr:runWhenOnline(function()
-                local ok, err = EReolenWrapper:call(function(token)
-                    return ereol.Profile.addToCheckList(identifier, token)
-                end)
-                if not ok then
-                    UIManager:show(InfoMessage:new{ text = err })
-                    return
-                end
-                EReolenWrapper:invalidateProfile()
-                UIManager:show(InfoMessage:new{ text = _("Added to your want-to-read list."), timeout = 2 })
-                back_here()
-            end)
-        end)
+    -------------------------------------------------------------------- show
+    -- The cover is nearly always already on disk from the grid we came from, so
+    -- this rarely touches the network.
+    local cover_bb
+    if cover_url then
+        local page_cover_w = math.floor(
+            (Screen:getWidth() - 2 * Size.padding.large - 18) * 0.30)
+        cover_bb = EReolenCovers:thumbnail(cover_url, page_cover_w,
+            math.floor(page_cover_w * 1.45))
     end
 
-    -- Reservations: only meaningful when the title cannot be borrowed now.
-    if reserved then
-        row(T(_("Reserved (%1) — tap to cancel"), reserved.status), function()
-            UIManager:show(ConfirmBox:new{
-                text = T(_("Cancel your reservation of “%1”?"), record.title),
-                ok_text = _("Cancel reservation"),
-                ok_callback = function()
-                    NetworkMgr:runWhenOnline(function()
-                        local ok, err = EReolenWrapper:call(function(token)
-                            return ereol.Profile.removeReservations({reserved.loanIdentifier.identifier}, token)
-                        end)
-                        if not ok then
-                            UIManager:show(InfoMessage:new{ text = err })
-                            return
-                        end
-                        EReolenWrapper:invalidateProfile()
-                        back_here()
-                    end)
-                end,
-            })
-        end)
-    elseif not existing and status and status ~= STATUS_LOANABLE then
-        row(_("Reserve"), function() EReolenItem.reserve(record, back_here) end)
-    end
-
-    if existing then
-        row(T(_("Borrowed — expires %1"), formatDate(existing.expireDate)))
-        row(_("Download"), function()
-            EReolenDownload.loan(existing, record.title)
-        end)
-    elseif status == STATUS_LOANABLE then
-        row(_("Borrow"), function()
-            EReolenItem.borrow(host, record, refresh)
-        end)
-    elseif status then
-        row(T(_("Not available to borrow (%1)"), status))
-    else
-        row(_("Availability unknown"))
-    end
-
-    host:showPage(record.title, item_table, on_back)
+    UIManager:show(EReolenItemPage:new{
+        record = record,
+        cover_bb = cover_bb,
+        headline = joinList(dedupeNames(record.creators)),
+        facts = #facts > 0 and table.concat(facts, " · ") or nil,
+        series = joinList(dedupeNames(record.series)) and
+            T(_("Series: %1"), joinList(dedupeNames(record.series))) or nil,
+        status_text = status_text,
+        summary = blurbOf(record),
+        actions = actions,
+        sections = sections,
+        on_close = on_back,
+    })
 end
 
 return EReolenItem

@@ -9,7 +9,7 @@ local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local _ = require("gettext")
 local Screen = require("device").screen
-local Button = require("ui/widget/button")
+local EReolenNavBar = require("ereolennavbar")
 
 local EReolenBrowser = require("ereolenbrowser")
 local EReolenSearch =require("ereolensearch")
@@ -48,82 +48,62 @@ function EReolenCatalog:init()
     self.active_page = FrameContainer:new{
         padding = 0,
         bordersize = 0,
-        height = Screen:getHeight() * 0.9,
+        height = Screen:getHeight() - math.floor(Screen:getHeight() * 0.085),
         width = Screen:getWidth(),
         background = Blitbuffer.COLOR_WHITE,
     }
-    -- Five buttons of equal width, with room for each one's margins. Sizing the
-    -- close button separately made it 12px wide on a 600px screen, and once the
-    -- margins came off, TextWidget refused the non-positive text width.
-    local tab_margin = 2
-    local tab_button_width = math.floor(Screen:getWidth() / 5) - tab_margin * 2
-    self.bottom_tab = FrameContainer:new{
-        padding = 0,
-        bordersize = 0,
-        height = Screen:getHeight() * 0.1,
-        width = Screen:getWidth(),
-        background = Blitbuffer.COLOR_WHITE,
-        HorizontalGroup:new{
-            Button:new{
-                text = _("FRONT"),
-                width = tab_button_width,
-                margin = tab_margin,
+    local function switchTo(id, widget, before)
+        self.active_page[1] = widget
+        if before then before() end
+        self.nav_bar:setActive(id)
+        UIManager:setDirty(self, function()
+            return "ui", self[1].dimen
+        end)
+    end
+
+    self.nav_bar = EReolenNavBar:new{
+        show_parent = self,
+        tabs = {
+            {
+                id = "front", label = _("Front"), icon = "home",
+                callback = function() switchTo("front", ereolen_browser) end,
+            },
+            {
+                id = "search", label = _("Search"), icon = "appbar.search",
                 callback = function()
-                    self.active_page[1] = ereolen_browser
-                    UIManager:setDirty(self, function()
-                        return "ui", self[1].dimen
-                    end)
-                end,
-            },    
-            Button:new{
-                text = _("SEARCH"),
-                width = tab_button_width,
-                margin = tab_margin,
-                callback = function()
-                    -- Tapping SEARCH while already on it means "search for
-                    -- something else", which is why results carry no edit tile.
+                    -- Tapping Search while already on it means "search for
+                    -- something else", which is why results carry no edit row.
                     if self.active_page[1] == ereolen_search then
                         ereolen_search:displayNewSearch(ereolen_search.last_query)
                         return
                     end
-                    self.active_page[1] = ereolen_search
-                    UIManager:setDirty(self, function()
-                        return "ui", self[1].dimen
-                    end)
+                    switchTo("search", ereolen_search)
                 end,
-            },    
-            Button:new{
-                text = _("READ"),
-                width = tab_button_width,
-                margin = tab_margin,
+            },
+            {
+                id = "read", label = _("Read"), icon = "book.opened",
                 callback = function()
                     -- "Read" is the loans list: those are the books you can open.
-                    self.active_page[1] = ereolen_account
-                    ereolen_account:showLoans()
-                    UIManager:setDirty(self, function()
-                        return "ui", self[1].dimen
+                    switchTo("read", ereolen_account, function()
+                        ereolen_account:showLoans()
                     end)
                 end,
             },
-            Button:new{
-                text = _("ACCOUNT"),
-                width = tab_button_width,
-                margin = tab_margin,
+            {
+                id = "account", label = _("Account"), icon = "appbar.settings",
                 callback = function()
-                    self.active_page[1] = ereolen_account
-                    UIManager:setDirty(self, function()
-                        return "ui", self[1].dimen
+                    switchTo("account", ereolen_account, function()
+                        ereolen_account:showStart()
                     end)
                 end,
-            },   
-            Button:new{
-                text = _("CLOSE"),
-                width = tab_button_width,
-                margin = tab_margin,
+            },
+            {
+                id = "close", label = _("Close"), icon = "exit",
                 callback = function() return self:onClose() end,
-            },    
+            },
         },
     }
+
     self.active_page[1] = ereolen_browser
     self[1] = FrameContainer:new{
         padding = 0,
@@ -131,7 +111,7 @@ function EReolenCatalog:init()
         background = Blitbuffer.COLOR_WHITE,
         VerticalGroup:new{
             self.active_page,
-            self.bottom_tab,
+            self.nav_bar,
         },
     }
     
