@@ -47,6 +47,10 @@ local CODE_UNAVAILABLE_FOR_ACCOUNT = 11675
 -- 10407, which is how the server rejects a malformed identifier -- so this also
 -- confirmed that createLoan accepts search-form identifiers.
 local CODE_ALREADY_LOANED = 13131
+-- Observed 2026-07-25 from getAboutCreators, getMoreInSameSeries and friends.
+-- It is not a failure: the server simply has nothing for this record, and the
+-- app shows no such section at all. Treat it as "empty", never as an error.
+local CODE_NO_RESULT = 10019
 
 local EReolenWrapper = {
     token = nil,
@@ -70,6 +74,8 @@ function EReolenWrapper:errorMessage(vc)
         return _("This is not available for your library account.")
     elseif code == CODE_ALREADY_LOANED then
         return _("You have already borrowed this title.")
+    elseif code == CODE_NO_RESULT then
+        return _("eReolen has nothing here.")
     end
     local message = vc.message
     if message == nil or message == "" then
@@ -182,6 +188,17 @@ function EReolenWrapper:call(fn)
         return nil, self:errorMessage(vc)
     end
     return vc.data
+end
+
+--- Like call(), but 10019 ("no result") comes back as an empty list.
+-- The optional sections of an item -- related titles, author portrait, reviews
+-- -- are simply absent for many records, and the app shows no section at all
+-- rather than an error. Only a real failure should reach the user as one.
+function EReolenWrapper:callAllowEmpty(fn)
+    local data, err = self:call(fn)
+    if data then return data end
+    if err == self:errorMessage({ code = CODE_NO_RESULT }) then return {} end
+    return nil, err
 end
 
 function EReolenWrapper:logout()

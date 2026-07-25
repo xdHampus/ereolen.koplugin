@@ -240,11 +240,11 @@ local function describe(record)
 end
 
 --- A page of records, each row opening its own item view.
-function EReolenItem.showRecordList(host, title, records, on_back)
+function EReolenItem.showRecordList(host, title, records, on_back, empty_text)
     local item_table = {}
     if #records == 0 then
         table.insert(item_table, {
-            text = _("Nothing here"),
+            text = empty_text or _("Nothing here"),
             deletable = false, editable = false,
         })
     end
@@ -269,7 +269,10 @@ local function relatedRow(host, row, label, page_title, fetch, on_back)
         NetworkMgr:runWhenOnline(function()
             local records, err = fetch()
             if not records then
-                UIManager:show(InfoMessage:new{ text = err })
+                -- Still open the page: an error the user has to dismiss before
+                -- landing back where they started reads as the tap having done
+                -- nothing at all.
+                EReolenItem.showRecordList(host, page_title, {}, on_back, err)
                 return
             end
             EReolenItem.showRecordList(host, page_title, records, on_back)
@@ -343,12 +346,14 @@ function EReolenItem.show(host, record, on_back)
 
     local back_here = function() EReolenItem.show(host, record, on_back) end
     local settings = ereol.QuerySettings()
+    -- endIndex is a count, not an end offset: 20 related titles is plenty for
+    -- a row you tap out of curiosity.
     settings.startIndex = 0
     settings.endIndex = 20
 
     -- Same title in another format: this is the ebook <-> audiobook switch.
     relatedRow(host, row, _("Other formats of this title"), record.title, function()
-        local others, err = EReolenWrapper:call(function(token)
+        local others, err = EReolenWrapper:callAllowEmpty(function(token)
             return ereol.Item.getOthersOfSameTitle(identifier, token)
         end)
         if not others then return nil, err end
@@ -363,7 +368,7 @@ function EReolenItem.show(host, record, on_back)
     local creator = record.creators and record.creators[1]
     if creator then
         relatedRow(host, row, T(_("More by %1"), creator), creator, function()
-            local page, err = EReolenWrapper:call(function(token)
+            local page, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getMoreOfSameCreator(identifier, token, settings)
             end)
             if not page then return nil, err end
@@ -373,7 +378,7 @@ function EReolenItem.show(host, record, on_back)
 
     if record.series and #record.series > 0 then
         relatedRow(host, row, T(_("More in %1"), record.series[1]), record.series[1], function()
-            local page, err = EReolenWrapper:call(function(token)
+            local page, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getMoreInSameSeries(identifier, token, settings)
             end)
             if not page then return nil, err end
@@ -382,7 +387,7 @@ function EReolenItem.show(host, record, on_back)
     end
 
     relatedRow(host, row, _("More in this genre"), _("Same genre"), function()
-        local page, err = EReolenWrapper:call(function(token)
+        local page, err = EReolenWrapper:callAllowEmpty(function(token)
             return ereol.Item.getMoreOfSameGenre(identifier, token, settings)
         end)
         if not page then return nil, err end
@@ -390,7 +395,7 @@ function EReolenItem.show(host, record, on_back)
     end, back_here)
 
     relatedRow(host, row, _("Similar titles"), _("Similar titles"), function()
-        return EReolenWrapper:call(function(token)
+        return EReolenWrapper:callAllowEmpty(function(token)
             -- Note: this method rejects an 8th param, so the wrapper strips
             -- facets from the settings it is given.
             return ereol.Item.getSomethingSimilar(identifier, token, settings)
@@ -399,7 +404,7 @@ function EReolenItem.show(host, record, on_back)
 
     row(_("About the author"), function()
         NetworkMgr:runWhenOnline(function()
-            local about, err = EReolenWrapper:call(function(token)
+            local about, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getAboutCreators(identifier, token)
             end)
             if not about then
@@ -427,7 +432,7 @@ function EReolenItem.show(host, record, on_back)
 
     row(_("Reviews"), function()
         NetworkMgr:runWhenOnline(function()
-            local reviews, err = EReolenWrapper:call(function(token)
+            local reviews, err = EReolenWrapper:callAllowEmpty(function(token)
                 return ereol.Item.getReviews(identifier, token)
             end)
             if not reviews then

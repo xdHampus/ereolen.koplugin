@@ -83,11 +83,9 @@ function EReolenBrowser:showPage(title, item_table, on_back)
     table.insert(item_table, {
         text = _("Back"),
         deletable = false, editable = false,
-        callback = on_back or function() self:init() end,
+        callback = on_back or function() self:showStart() end,
     })
-    self.title = title
-    self.item_table = item_table
-    Menu.init(self)
+    self:switchItemTable(title, item_table)
 end
 
 function EReolenBrowser:showRecommendations()
@@ -100,14 +98,17 @@ function EReolenBrowser:showRecommendations()
             return
         end
         EReolenItem.showRecordList(self, _("Recommended for you"), records,
-            function() self:init() end)
+            function() self:showStart() end)
     end)
 end
 
+--- Back to the front page without re-running Menu.init on a live widget.
+function EReolenBrowser:showStart()
+    self:switchItemTable(_("eReolen"), self:genItemTable())
+end
+
 function EReolenBrowser:refresh()
-    self.item_table = self:genItemTable()
-    Menu.init(self)
-    UIManager:setDirty(self.show_parent or self, "ui")
+    self:switchItemTable(self.title, self:genItemTable())
 end
 
 -- This function shows a dialog with input fields for the library card.

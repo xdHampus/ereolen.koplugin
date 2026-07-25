@@ -89,15 +89,18 @@ function EReolenAccount:genStartStateItemTable()
 end
 
 --- Replace the menu contents with `item_table` under `title`, plus a Back row.
+--- Back to the account root without re-running Menu.init on a live widget.
+function EReolenAccount:showStart()
+    self:switchItemTable(_("Account"), self:genStartStateItemTable())
+end
+
 function EReolenAccount:showPage(title, item_table, on_back)
     table.insert(item_table, {
         text = _("Back"),
         deletable = false, editable = false,
-        callback = on_back or function() self:init() end,
+        callback = on_back or function() self:showStart() end,
     })
-    self.title = title
-    self.item_table = item_table
-    Menu.init(self)
+    self:switchItemTable(title, item_table)
 end
 
 --- Open an account-list entry in the item view.

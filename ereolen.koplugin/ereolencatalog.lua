@@ -1,6 +1,4 @@
-local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
-local ConfirmBox = require("ui/widget/confirmbox")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local InputContainer = require("ui/widget/container/inputcontainer")
 
@@ -11,7 +9,6 @@ local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local _ = require("gettext")
 local Screen = require("device").screen
-local T = require("ffi/util").template
 local Button = require("ui/widget/button")
 
 local EReolenBrowser = require("ereolenbrowser")
@@ -29,24 +26,10 @@ function EReolenCatalog:init()
         is_popout = false,
         is_borderless = true,
         has_close_button = false,
-        close_callback = function() return self:onClose() end,
-        file_downloaded_callback = function(downloaded_file)
-            UIManager:show(ConfirmBox:new{
-                text = T(_("File saved to:\n%1\nWould you like to read the downloaded book now?"),
-                    BD.filepath(downloaded_file)),
-                ok_text = _("Read now"),
-                cancel_text = _("Read later"),
-                ok_callback = function()
-                    local Event = require("ui/event")
-                    UIManager:broadcastEvent(Event:new("SetupShowReader"))
-
-                    self:onClose()
-
-                    local ReaderUI = require("apps/reader/readerui")
-                    ReaderUI:showReader(downloaded_file)
-                end
-            })
-        end
+        -- No close_callback here. Menu:onMenuSelect calls it after *every* leaf
+        -- row's callback, so wiring it to onClose meant tapping any front-page
+        -- row tore the whole catalog down -- the list loaded and the window
+        -- vanished with no error. The CLOSE tab below is the way out.
     }
     local ereolen_search = EReolenSearch:new{
         title = "Search",
@@ -162,14 +145,21 @@ end
 
 function EReolenCatalog:showCatalog()
     logger.dbg("show eReolen catalog")
-    UIManager:show(EReolenCatalog:new{
+    local catalog = EReolenCatalog:new{
         dimen = Screen:getSize(),
         covers_fullscreen = true, -- hint for UIManager:_repaint()
-    })
+    }
+    -- ereolendownload needs to get this window out of the way before handing a
+    -- file to the reader or to the ACSM provider.
+    EReolenCatalog.instance = catalog
+    UIManager:show(catalog)
 end
 
 function EReolenCatalog:onClose()
     logger.dbg("close eReolen catalog")
+    if EReolenCatalog.instance == self then
+        EReolenCatalog.instance = nil
+    end
     UIManager:close(self)
     return true
 end

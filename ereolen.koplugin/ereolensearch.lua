@@ -21,7 +21,20 @@ local EReolenItem = require("ereolenitem")
 local EReolenShared = require("ereolenshared")
 local EReolenWrapper = require("ereolenwrapper")
 
-local PAGE_SIZE = 20
+-- How many collections to ask for at a time. A collection groups a title's
+-- ebook and audiobook editions, and it is collections the paging addresses, not
+-- records.
+--
+-- Note what the two QuerySettings fields actually mean, verified against the
+-- live API 2026-07-25: startIndex is an offset, but **endIndex is a count, not
+-- an end offset**, and it is capped at 200 -- 250 comes back as an HTTP error.
+-- The old code set endIndex = offset + PAGE_SIZE, so every page was larger than
+-- the one before it (page 2 fetched 40 collections, page 3 sixty...) and past
+-- offset 200 the request simply failed.
+--
+-- 100 is a compromise: about 180 records and ~3s on a Kobo, and enough that
+-- most searches need no second request at all.
+local PAGE_COLLECTIONS = 100
 
 local EReolenSearch = Menu:extend{
     width = Screen:getWidth(),
@@ -38,15 +51,18 @@ function EReolenSearch:init()
 end
 
 --- Same contract as EReolenAccount:showPage, so EReolenItem can render into us.
+--- Back to the search root without re-running Menu.init on a live widget.
+function EReolenSearch:showStart()
+    self:switchItemTable(_("Search"), self:genStartStateItemTable())
+end
+
 function EReolenSearch:showPage(title, item_table, on_back)
     table.insert(item_table, {
         text = _("Back"),
         deletable = false, editable = false,
-        callback = on_back or function() self:init() end,
+        callback = on_back or function() self:showStart() end,
     })
-    self.title = title
-    self.item_table = item_table
-    Menu.init(self)
+    self:switchItemTable(title, item_table)
 end
 
 function EReolenSearch:genStartStateItemTable()
@@ -231,7 +247,9 @@ local function describe(record)
     return label
 end
 
-function EReolenSearch:runSearch(query, offset, label)
+--- `offset` is a collection offset. `append` keeps what is already on screen
+-- and adds to it, which is what the "Show more" row at the end does.
+function EReolenSearch:runSearch(query, offset, label, append)
     if query == nil or query == "" then return end
     self.last_query = query
     self.last_label = label
@@ -239,7 +257,7 @@ function EReolenSearch:runSearch(query, offset, label)
     NetworkMgr:runWhenOnline(function()
         local settings = ereol.QuerySettings()
         settings.startIndex = offset
-        settings.endIndex = offset + PAGE_SIZE
+        settings.endIndex = PAGE_COLLECTIONS -- a count, not an end offset
 
         local page, err = EReolenWrapper:call(function(token)
             return ereol.Item.search(query, token, settings)
@@ -249,13 +267,17 @@ function EReolenSearch:runSearch(query, offset, label)
             return
         end
 
-        self:showResults(query, offset, page, label)
+        self:showResults(query, offset, page, label, append)
     end)
 end
 
-function EReolenSearch:showResults(query, offset, page, label)
+function EReolenSearch:showResults(query, offset, page, label, append)
     local records = flattenResults(page)
     local item_table = {}
+    -- Rows are rebuilt from scratch each time; only the accumulated record rows
+    -- carry over, so the header and footer are never duplicated.
+    local kept = (append and self.result_rows) or {}
+    local shown_before = #kept
 
     -- A browsed shelf has a name; only a typed query is worth offering to edit.
     if label then
@@ -287,8 +309,10 @@ function EReolenSearch:showResults(query, offset, page, label)
         end
     end
 
+    for i = 1, #kept do table.insert(item_table, kept[i]) end
+    local record_rows = kept
     for _, record in ipairs(records) do
-        table.insert(item_table, {
+        local row = {
             text = describe(record),
             deletable = false, editable = false,
             callback = function()
@@ -296,43 +320,50 @@ function EReolenSearch:showResults(query, offset, page, label)
                     self:showResults(query, offset, page, label)
                 end)
             end,
-        })
+        }
+        table.insert(item_table, row)
+        table.insert(record_rows, row)
     end
 
-    if offset > 0 then
-        table.insert(item_table, {
-            text = _("< Previous page"),
-            deletable = false, editable = false,
-            callback = function() self:runSearch(query, math.max(0, offset - PAGE_SIZE), label) end,
-        })
-    end
+    -- Remember only the record rows, so a later "Show more" extends the list
+    -- instead of re-adding the header and footer.
+    self.result_rows = record_rows
+
+    local total = page.count or 0
+    local shown = #records + shown_before
+
     if page.more then
+        -- Advance by the collections actually returned: near the end of a
+        -- result set the server hands back fewer than were asked for.
+        local next_offset = offset + #page.data
         table.insert(item_table, {
-            text = _("Next page >"),
+            text = T(_("Show more (%1 of %2 shown)"), shown, total),
             deletable = false, editable = false,
-            callback = function() self:runSearch(query, offset + PAGE_SIZE, label) end,
+            callback = function() self:runSearch(query, next_offset, label, true) end,
         })
     end
 
-    -- PageResult.count counts records, but startIndex/endIndex page over
-    -- *collections*, each of which groups a title's ebook and audiobook
-    -- editions. So there is no honest record range to show -- only a page
-    -- number and the total.
-    local shown = label or query
-    local title = shown
-    if page.count and page.count > 0 then
-        local page_no = math.floor(offset / PAGE_SIZE) + 1
-        title = T(_("%1 — page %2 (%3 results)"), shown, page_no, page.count)
-    end
-
-    self.title = title
-    self.item_table = item_table
-    table.insert(self.item_table, {
+    table.insert(item_table, {
         text = _("Back"),
         deletable = false, editable = false,
-        callback = function() self:init() end,
+        callback = function() self:showStart() end,
     })
-    Menu.init(self)
+
+    -- PageResult.count counts records while the indices address collections, so
+    -- a page range would be a guess. The count is honest, and KOReader's own
+    -- menu footer supplies "page x of y" for the rows now that the whole
+    -- result set lives in one item table.
+    local name = label or query
+    local title = name
+    if total > 0 then
+        title = shown < total
+            and T(_("%1 — %2 of %3"), name, shown, total)
+            or T(_("%1 — %2 results"), name, total)
+    end
+
+    -- A negative itemnumber tells switchItemTable to stay on the current page,
+    -- which is what makes "Show more" feel like growing the list.
+    self:switchItemTable(title, item_table, append and -1 or nil)
 end
 
 return EReolenSearch
