@@ -18,6 +18,7 @@ local _ = require("gettext")
 local T = require("ffi/util").template
 
 local EReolenItem = require("ereolenitem")
+local EReolenShared = require("ereolenshared")
 local EReolenWrapper = require("ereolenwrapper")
 
 local PAGE_SIZE = 20
@@ -57,12 +58,73 @@ function EReolenSearch:genStartStateItemTable()
     })
     if self.last_query then
         table.insert(item_table, {
-            text = T(_("Again: %1"), self.last_query),
+            text = T(_("Again: %1"), self.last_label or self.last_query),
             deletable = false, editable = false,
-            callback = function() self:runSearch(self.last_query, 0) end,
+            callback = function() self:runSearch(self.last_query, 0, self.last_label) end,
         })
     end
+    table.insert(item_table, {
+        text = _("Browse categories"),
+        deletable = false, editable = false,
+        callback = function() self:showCategories() end,
+    })
     return item_table
+end
+
+--- The app's curated categories, from Firebase rather than the RPC API.
+function EReolenSearch:showCategories()
+    NetworkMgr:runWhenOnline(function()
+        local data, err = EReolenShared:refresh()
+        if not data then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Could not load the categories:\n%1"), err),
+            })
+            return
+        end
+
+        local item_table = {}
+        for _, category in ipairs(data.categories) do
+            local label = category.title
+            if category.count then label = T("%1 (%2)", label, category.count) end
+            table.insert(item_table, {
+                text = label,
+                deletable = false, editable = false,
+                callback = function() self:showCategory(category) end,
+            })
+        end
+        self:showPage(_("Categories"), item_table)
+    end)
+end
+
+--- One category: its own query plus whichever shelves are CQL-backed.
+function EReolenSearch:showCategory(category)
+    local back = function() self:showCategories() end
+    local item_table = {}
+
+    if category.query then
+        table.insert(item_table, {
+            text = T(_("Everything in %1"), category.title),
+            deletable = false, editable = false,
+            callback = function() self:runSearch(category.query, 0, category.title) end,
+        })
+    end
+
+    for _, shelf in ipairs(category.shelves or {}) do
+        local title = shelf.title or _("Untitled shelf")
+        table.insert(item_table, {
+            text = title,
+            deletable = false, editable = false,
+            callback = function() self:runSearch(shelf.query, 0, title) end,
+        })
+    end
+
+    if #item_table == 0 then
+        table.insert(item_table, {
+            text = _("Nothing browsable in this category yet"),
+            deletable = false, editable = false,
+        })
+    end
+    self:showPage(category.title, item_table, back)
 end
 
 function EReolenSearch:displayNewSearch(default_text)
@@ -122,9 +184,10 @@ local function describe(record)
     return label
 end
 
-function EReolenSearch:runSearch(query, offset)
+function EReolenSearch:runSearch(query, offset, label)
     if query == nil or query == "" then return end
     self.last_query = query
+    self.last_label = label
 
     NetworkMgr:runWhenOnline(function()
         local settings = ereol.QuerySettings()
@@ -139,19 +202,28 @@ function EReolenSearch:runSearch(query, offset)
             return
         end
 
-        self:showResults(query, offset, page)
+        self:showResults(query, offset, page, label)
     end)
 end
 
-function EReolenSearch:showResults(query, offset, page)
+function EReolenSearch:showResults(query, offset, page, label)
     local records = flattenResults(page)
     local item_table = {}
 
-    table.insert(item_table, {
-        text = T(_("Edit search: %1"), query),
-        deletable = false, editable = false,
-        callback = function() self:displayNewSearch(query) end,
-    })
+    -- A browsed shelf has a name; only a typed query is worth offering to edit.
+    if label then
+        table.insert(item_table, {
+            text = _("New search"),
+            deletable = false, editable = false,
+            callback = function() self:displayNewSearch() end,
+        })
+    else
+        table.insert(item_table, {
+            text = T(_("Edit search: %1"), query),
+            deletable = false, editable = false,
+            callback = function() self:displayNewSearch(query) end,
+        })
+    end
 
     if #records == 0 then
         table.insert(item_table, {
@@ -166,7 +238,7 @@ function EReolenSearch:showResults(query, offset, page)
             deletable = false, editable = false,
             callback = function()
                 EReolenItem.show(self, record, function()
-                    self:showResults(query, offset, page)
+                    self:showResults(query, offset, page, label)
                 end)
             end,
         })
@@ -176,14 +248,14 @@ function EReolenSearch:showResults(query, offset, page)
         table.insert(item_table, {
             text = _("< Previous page"),
             deletable = false, editable = false,
-            callback = function() self:runSearch(query, math.max(0, offset - PAGE_SIZE)) end,
+            callback = function() self:runSearch(query, math.max(0, offset - PAGE_SIZE), label) end,
         })
     end
     if page.more then
         table.insert(item_table, {
             text = _("Next page >"),
             deletable = false, editable = false,
-            callback = function() self:runSearch(query, offset + PAGE_SIZE) end,
+            callback = function() self:runSearch(query, offset + PAGE_SIZE, label) end,
         })
     end
 
@@ -191,10 +263,11 @@ function EReolenSearch:showResults(query, offset, page)
     -- *collections*, each of which groups a title's ebook and audiobook
     -- editions. So there is no honest record range to show -- only a page
     -- number and the total.
-    local title = query
+    local shown = label or query
+    local title = shown
     if page.count and page.count > 0 then
         local page_no = math.floor(offset / PAGE_SIZE) + 1
-        title = T(_("%1 — page %2 (%3 results)"), query, page_no, page.count)
+        title = T(_("%1 — page %2 (%3 results)"), shown, page_no, page.count)
     end
 
     self.title = title
