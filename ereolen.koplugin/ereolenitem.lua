@@ -162,6 +162,63 @@ function EReolenItem.borrow(host, record, refresh)
     })
 end
 
+--- PageResult.data is a list of collections, each a list of Record.
+local function flattenPage(page)
+    local records = {}
+    for _, collection in ipairs(page.data or {}) do
+        for _, record in ipairs(collection) do
+            table.insert(records, record)
+        end
+    end
+    return records
+end
+
+local function describe(record)
+    local label = record.title
+    local creator = record.creators and record.creators[1]
+    if creator then label = T("%1 — %2", label, creator) end
+    if record.recordType then label = T("%1 (%2)", label, record.recordType) end
+    return label
+end
+
+--- A page of records, each row opening its own item view.
+function EReolenItem.showRecordList(host, title, records, on_back)
+    local item_table = {}
+    if #records == 0 then
+        table.insert(item_table, {
+            text = _("Nothing here"),
+            deletable = false, editable = false,
+        })
+    end
+    for _, record in ipairs(records) do
+        table.insert(item_table, {
+            text = describe(record),
+            deletable = false, editable = false,
+            callback = function()
+                EReolenItem.show(host, record, function()
+                    EReolenItem.showRecordList(host, title, records, on_back)
+                end)
+            end,
+        })
+    end
+    host:showPage(title, item_table, on_back)
+end
+
+--- A row that fetches a related-titles list only when tapped, so opening an item
+-- view stays one round trip rather than six.
+local function relatedRow(host, row, label, page_title, fetch, on_back)
+    row(label, function()
+        NetworkMgr:runWhenOnline(function()
+            local records, err = fetch()
+            if not records then
+                UIManager:show(InfoMessage:new{ text = err })
+                return
+            end
+            EReolenItem.showRecordList(host, page_title, records, on_back)
+        end)
+    end)
+end
+
 local function showCover(record, url)
     NetworkMgr:runWhenOnline(function()
         local bb, err = EReolenCovers:fetch(url)
@@ -226,7 +283,88 @@ function EReolenItem.show(host, record, on_back)
         end)
     end
 
-    local refresh = function() EReolenItem.show(host, record, on_back) end
+    local back_here = function() EReolenItem.show(host, record, on_back) end
+    local settings = ereol.QuerySettings()
+    settings.startIndex = 0
+    settings.endIndex = 20
+
+    -- Same title in another format: this is the ebook <-> audiobook switch.
+    relatedRow(host, row, _("Other formats of this title"), record.title, function()
+        local others, err = EReolenWrapper:call(function(token)
+            return ereol.Item.getOthersOfSameTitle(identifier, token)
+        end)
+        if not others then return nil, err end
+        -- Drop the edition we are already looking at.
+        local out = {}
+        for _, r in ipairs(others) do
+            if r.loanIdentifier.identifier ~= identifier then table.insert(out, r) end
+        end
+        return out
+    end, back_here)
+
+    local creator = record.creators and record.creators[1]
+    if creator then
+        relatedRow(host, row, T(_("More by %1"), creator), creator, function()
+            local page, err = EReolenWrapper:call(function(token)
+                return ereol.Item.getMoreOfSameCreator(identifier, token, settings)
+            end)
+            if not page then return nil, err end
+            return flattenPage(page)
+        end, back_here)
+    end
+
+    if record.series and #record.series > 0 then
+        relatedRow(host, row, T(_("More in %1"), record.series[1]), record.series[1], function()
+            local page, err = EReolenWrapper:call(function(token)
+                return ereol.Item.getMoreInSameSeries(identifier, token, settings)
+            end)
+            if not page then return nil, err end
+            return flattenPage(page)
+        end, back_here)
+    end
+
+    relatedRow(host, row, _("More in this genre"), _("Same genre"), function()
+        local page, err = EReolenWrapper:call(function(token)
+            return ereol.Item.getMoreOfSameGenre(identifier, token, settings)
+        end)
+        if not page then return nil, err end
+        return flattenPage(page)
+    end, back_here)
+
+    relatedRow(host, row, _("Similar titles"), _("Similar titles"), function()
+        return EReolenWrapper:call(function(token)
+            -- Note: this method rejects an 8th param, so the wrapper strips
+            -- facets from the settings it is given.
+            return ereol.Item.getSomethingSimilar(identifier, token, settings)
+        end)
+    end, back_here)
+
+    row(_("Reviews"), function()
+        NetworkMgr:runWhenOnline(function()
+            local reviews, err = EReolenWrapper:call(function(token)
+                return ereol.Item.getReviews(identifier, token)
+            end)
+            if not reviews then
+                UIManager:show(InfoMessage:new{ text = err })
+                return
+            end
+            if #reviews == 0 then
+                UIManager:show(InfoMessage:new{ text = _("No reviews for this title.") })
+                return
+            end
+            local parts = {}
+            for _, review in ipairs(reviews) do
+                table.insert(parts, review.source .. "\n" .. review.subTitle
+                    .. (review.url ~= "" and ("\n" .. review.url) or ""))
+            end
+            UIManager:show(TextViewer:new{
+                title = T(_("Reviews: %1"), record.title),
+                text = table.concat(parts, "\n\n"),
+            })
+        end)
+    end)
+
+    local refresh = back_here
 
     if existing then
         row(T(_("Borrowed — expires %1"), formatDate(existing.expireDate)))

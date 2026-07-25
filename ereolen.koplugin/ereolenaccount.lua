@@ -135,10 +135,18 @@ function EReolenAccount:showLoans()
                 text = T(_("%1 (expires %2)"), label, formatDate(loan.expireDate)),
                 deletable = false, editable = false,
                 callback = function()
-                    if record then
-                        EReolenItem.show(self, record, function() self:showLoans() end)
+                    -- The batch lookup can miss; getProduct is the single-record
+                    -- fallback so the loan still opens the full item view.
+                    local single = record
+                    if not single then
+                        single = EReolenWrapper:call(function(token)
+                            return ereol.Item.getProduct(loan.loanIdentifier.identifier, token)
+                        end)
+                    end
+                    if single then
+                        EReolenItem.show(self, single, function() self:showLoans() end)
                     else
-                        -- No metadata resolved; the download is still the point.
+                        -- Still no metadata; the download is the point anyway.
                         EReolenDownload.loan(loan, label)
                     end
                 end,

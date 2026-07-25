@@ -13,6 +13,7 @@ local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
+local EReolenItem = require("ereolenitem")
 local EReolenWrapper = require("ereolenwrapper")
 
 local EReolenBrowser = Menu:extend{
@@ -61,6 +62,11 @@ function EReolenBrowser:genItemTable()
             deletable = false, editable = false,
             callback = function() self:signOut() end,
         })
+        table.insert(item_table, {
+            text = _("Recommended for you"),
+            deletable = false, editable = false,
+            callback = function() self:showRecommendations() end,
+        })
     else
         table.insert(item_table, {
             text = _("Not signed in — tap to add your library card"),
@@ -70,6 +76,32 @@ function EReolenBrowser:genItemTable()
     end
 
     return item_table
+end
+
+--- Same contract as the other tabs, so EReolenItem can render into us.
+function EReolenBrowser:showPage(title, item_table, on_back)
+    table.insert(item_table, {
+        text = _("Back"),
+        deletable = false, editable = false,
+        callback = on_back or function() self:init() end,
+    })
+    self.title = title
+    self.item_table = item_table
+    Menu.init(self)
+end
+
+function EReolenBrowser:showRecommendations()
+    NetworkMgr:runWhenOnline(function()
+        local records, err = EReolenWrapper:call(function(token)
+            return ereol.Item.getPersonalRecommendations(token)
+        end)
+        if not records then
+            UIManager:show(InfoMessage:new{ text = err })
+            return
+        end
+        EReolenItem.showRecordList(self, _("Recommended for you"), records,
+            function() self:init() end)
+    end)
 end
 
 function EReolenBrowser:refresh()
