@@ -75,10 +75,61 @@ local function normaliseQuery(query)
 end
 
 --- Keep only what the browse UI uses: titles, counts and CQL queries.
--- Drops categories_details and front_page (70%+ of the payload) and the cover
--- URL lists, which are the bulk of what is left.
+-- Drops categories_details (70%+ of the payload) and the per-category cover URL
+-- lists, which are the bulk of what is left.
+--
+-- The front page is kept, because it is worth its size: every carousel ships
+-- its own records *and* a cover URL for each one, so the whole front page draws
+-- from this cache with no RPC call at all -- which is exactly how the app does
+-- it. That is about 300 items and 60 KB once trimmed to the fields we show.
+--- Collapse the spellings of one book down to a single key.
+-- Verified against the live blob: the same title arrives as
+--   "Tvunget til tavshed"  /  "Tvunget til tavshed (Ved Susanne Storm)"
+--   "Krucifiks morderen"   /  "Krucifiks morderen : dit eneste haab ... : thriller"
+-- so a shelf shows every book twice unless the narrator suffix and the subtitle
+-- are stripped first. Creators are no help: the editions disagree about which
+-- of "Linda Castillo" / "Castillo, Linda" comes first.
+local function titleKey(title)
+    local key = (title or ""):gsub("%s*%b()", "")   -- "(Ved Susanne Storm)"
+    key = key:gsub("%s*:.*$", "")                   -- " : subtitle : genre"
+    return key:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+end
+
 local function compact(raw)
-    local out = { generation = nil, categories = {}, sortings = {}, facet_labels = {} }
+    local out = { generation = nil, categories = {}, shelves = {},
+                  sortings = {}, facet_labels = {} }
+
+    local cover_urls = (raw.front_page or {}).shelves_cover_urls or {}
+    for _, shelf in ipairs((raw.front_page or {}).shelves or {}) do
+        if shelf.type == "carousel" and shelf.title and shelf.title ~= "" then
+            local items = {}
+            -- A shelf lists a title once per edition, so the ebook and the
+            -- audiobook of the same book arrive as two near-identical entries.
+            -- Showing both just halves the shelf; keep the first.
+            local seen = {}
+            for _, item in ipairs(shelf.items or {}) do
+                local key = titleKey(item.title)
+                if item.identifier and item.title and not seen[key] then
+                    seen[key] = true
+                    table.insert(items, {
+                        identifier = item.identifier,
+                        title = item.title,
+                        creator = (item.creators or {})[1],
+                        year = item.year,
+                        publisher = item.publisher,
+                        cover = cover_urls[item.identifier],
+                    })
+                end
+            end
+            if #items > 0 then
+                table.insert(out.shelves, {
+                    title = shelf.title,
+                    query = normaliseQuery(shelf.query),
+                    items = items,
+                })
+            end
+        end
+    end
 
     for _, category in ipairs(raw.categories or {}) do
         local shelves = {}
@@ -169,6 +220,24 @@ function EReolenShared:refresh(force)
     self.data = data
     logger.dbg("eReolen: shared content refreshed,", #data.categories, "categories")
     return data
+end
+
+--- The front page's carousels, each with its own records and cover URLs.
+function EReolenShared:shelves()
+    local data = self:loadCache()
+    return data and data.shelves or {}
+end
+
+--- identifier -> cover URL for everything on the front page, for seeding the
+--- cover cache so no getCovers call is needed to draw it.
+function EReolenShared:coverUrls()
+    local map = {}
+    for _, shelf in ipairs(self:shelves()) do
+        for _, item in ipairs(shelf.items) do
+            if item.cover then map[item.identifier] = item.cover end
+        end
+    end
+    return map
 end
 
 function EReolenShared:categories()

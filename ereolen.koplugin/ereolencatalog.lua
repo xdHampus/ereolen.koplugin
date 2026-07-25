@@ -80,6 +80,12 @@ function EReolenCatalog:init()
                 width = tab_button_width,
                 margin = tab_margin,
                 callback = function()
+                    -- Tapping SEARCH while already on it means "search for
+                    -- something else", which is why results carry no edit tile.
+                    if self.active_page[1] == ereolen_search then
+                        ereolen_search:displayNewSearch(ereolen_search.last_query)
+                        return
+                    end
                     self.active_page[1] = ereolen_search
                     UIManager:setDirty(self, function()
                         return "ui", self[1].dimen

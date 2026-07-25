@@ -18,6 +18,7 @@ local _ = require("gettext")
 local T = require("ffi/util").template
 
 local EReolenCovers = require("ereolencovers")
+local EReolenView = require("ereolenview")
 local EReolenDownload = require("ereolendownload")
 local EReolenWrapper = require("ereolenwrapper")
 
@@ -249,15 +250,11 @@ function EReolenItem.showRecordList(host, title, records, on_back, empty_text)
         })
     end
     for _, record in ipairs(records) do
-        table.insert(item_table, {
-            text = describe(record),
-            deletable = false, editable = false,
-            callback = function()
-                EReolenItem.show(host, record, function()
-                    EReolenItem.showRecordList(host, title, records, on_back)
-                end)
-            end,
-        })
+        table.insert(item_table, EReolenView.recordRow(record, function()
+            EReolenItem.show(host, record, function()
+                EReolenItem.showRecordList(host, title, records, on_back)
+            end)
+        end))
     end
     host:showPage(title, item_table, on_back)
 end

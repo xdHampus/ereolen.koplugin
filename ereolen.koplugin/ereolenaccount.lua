@@ -4,7 +4,7 @@ the library's loan quota, all from the eReolen Profile API.
 ]]
 
 local InfoMessage = require("ui/widget/infomessage")
-local Menu = require("ui/widget/menu")
+local EReolenView = require("ereolenview")
 local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
@@ -14,7 +14,7 @@ local EReolenDownload = require("ereolendownload")
 local EReolenItem = require("ereolenitem")
 local EReolenWrapper = require("ereolenwrapper")
 
-local EReolenAccount = Menu:extend{
+local EReolenAccount = EReolenView:extend{
     width = Screen:getWidth(),
     height = Screen:getHeight() * 0.9,
     no_title = false,
@@ -51,7 +51,8 @@ function EReolenAccount:init()
     self.title = _("Account")
     self.title_bar_left_icon = nil
     self.item_table = self:genStartStateItemTable()
-    Menu.init(self) -- call parent's init()
+    self:setupViewToggle()
+    EReolenView.init(self) -- call parent's init()
 end
 
 function EReolenAccount:genStartStateItemTable()
@@ -95,12 +96,7 @@ function EReolenAccount:showStart()
 end
 
 function EReolenAccount:showPage(title, item_table, on_back)
-    table.insert(item_table, {
-        text = _("Back"),
-        deletable = false, editable = false,
-        callback = on_back or function() self:showStart() end,
-    })
-    self:switchItemTable(title, item_table)
+    self:showRecords(title, item_table, on_back or function() self:showStart() end)
 end
 
 --- Open an account-list entry in the item view.
@@ -155,16 +151,21 @@ function EReolenAccount:showLoans()
             local loan = loans[i]
             local record = records[loan.loanIdentifier.identifier]
             local label = describe(record, loan.loanIdentifier)
-            table.insert(item_table, {
-                text = T(_("%1 (expires %2)"), label, formatDate(loan.expireDate)),
-                deletable = false, editable = false,
-                callback = function()
-                    self:openEntry(loan, record, label,
-                        function() self:showLoans() end,
-                        -- Still no metadata; the download is the point anyway.
-                        function() EReolenDownload.loan(loan, label) end)
-                end,
-            })
+            local open = function()
+                self:openEntry(loan, record, label,
+                    function() self:showLoans() end,
+                    -- Still no metadata; the download is the point anyway.
+                    function() EReolenDownload.loan(loan, label) end)
+            end
+            local status = T(_("expires %1"), formatDate(loan.expireDate))
+            if record then
+                table.insert(item_table, EReolenView.recordRow(record, open, status))
+            else
+                table.insert(item_table, {
+                    text = T(_("%1 (%2)"), label, status),
+                    deletable = false, editable = false, callback = open,
+                })
+            end
         end
     end
     self:showPage(title, item_table)
@@ -188,14 +189,19 @@ function EReolenAccount:showReservations()
         for i = 1, #reservations do
             local reservation = reservations[i]
             local record = records[reservation.loanIdentifier.identifier]
-            table.insert(item_table, {
-                text = T(_("%1 (%2)"),
-                    describe(record, reservation.loanIdentifier), reservation.status),
-                deletable = false, editable = false,
-                callback = function()
-                    self:openEntry(reservation, record, nil, function() self:showReservations() end)
-                end,
-            })
+            local open = function()
+                self:openEntry(reservation, record, nil, function() self:showReservations() end)
+            end
+            if record then
+                table.insert(item_table,
+                    EReolenView.recordRow(record, open, reservation.status))
+            else
+                table.insert(item_table, {
+                    text = T(_("%1 (%2)"),
+                        describe(record, reservation.loanIdentifier), reservation.status),
+                    deletable = false, editable = false, callback = open,
+                })
+            end
         end
     end
     self:showPage(title, item_table)
@@ -219,13 +225,17 @@ function EReolenAccount:showChecklist()
         for i = 1, #checklist do
             local entry = checklist[i]
             local record = records[entry.loanIdentifier.identifier]
-            table.insert(item_table, {
-                text = describe(record, entry.loanIdentifier),
-                deletable = false, editable = false,
-                callback = function()
-                    self:openEntry(entry, record, nil, function() self:showChecklist() end)
-                end,
-            })
+            local open = function()
+                self:openEntry(entry, record, nil, function() self:showChecklist() end)
+            end
+            if record then
+                table.insert(item_table, EReolenView.recordRow(record, open))
+            else
+                table.insert(item_table, {
+                    text = describe(record, entry.loanIdentifier),
+                    deletable = false, editable = false, callback = open,
+                })
+            end
         end
     end
     self:showPage(title, item_table)

@@ -10,7 +10,7 @@ borrowing and downloading.
 
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
-local Menu = require("ui/widget/menu")
+local EReolenView = require("ereolenview")
 local NetworkMgr = require("ui/network/manager")
 local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
@@ -36,7 +36,7 @@ local EReolenWrapper = require("ereolenwrapper")
 -- most searches need no second request at all.
 local PAGE_COLLECTIONS = 100
 
-local EReolenSearch = Menu:extend{
+local EReolenSearch = EReolenView:extend{
     width = Screen:getWidth(),
     height = Screen:getHeight() * 0.9,
     no_title = false,
@@ -47,7 +47,8 @@ function EReolenSearch:init()
     self.title = _("Search")
     self.title_bar_left_icon = nil
     self.item_table = self:genStartStateItemTable()
-    Menu.init(self) -- call parent's init()
+    self:setupViewToggle()
+    EReolenView.init(self) -- call parent's init()
 end
 
 --- Same contract as EReolenAccount:showPage, so EReolenItem can render into us.
@@ -57,12 +58,7 @@ function EReolenSearch:showStart()
 end
 
 function EReolenSearch:showPage(title, item_table, on_back)
-    table.insert(item_table, {
-        text = _("Back"),
-        deletable = false, editable = false,
-        callback = on_back or function() self:showStart() end,
-    })
-    self:switchItemTable(title, item_table)
+    self:showRecords(title, item_table, on_back or function() self:showStart() end)
 end
 
 function EReolenSearch:genStartStateItemTable()
@@ -225,13 +221,20 @@ function EReolenSearch:displayNewSearch(default_text)
     self.search_input:onShowKeyboard()
 end
 
---- PageResult.data is a list of collections, each a list of Record.
+--- One Record per collection.
+-- PageResult.data groups a title's editions together, so flattening it put the
+-- same book on screen two or three times over -- "Vejen til Wigan Pier" as
+-- ebook and as audiobook, side by side. Take the first of each and let the item
+-- view's "Other formats of this title" row reach the rest. An ebook is the
+-- better default on an e-reader, so prefer one when the collection has both.
 local function flattenResults(page)
     local records = {}
     for _, collection in ipairs(page.data or {}) do
+        local pick = collection[1]
         for _, record in ipairs(collection) do
-            table.insert(records, record)
+            if record.recordType == "ebook" then pick = record break end
         end
+        if pick then table.insert(records, pick) end
     end
     return records
 end
@@ -279,20 +282,9 @@ function EReolenSearch:showResults(query, offset, page, label, append)
     local kept = (append and self.result_rows) or {}
     local shown_before = #kept
 
-    -- A browsed shelf has a name; only a typed query is worth offering to edit.
-    if label then
-        table.insert(item_table, {
-            text = _("New search"),
-            deletable = false, editable = false,
-            callback = function() self:displayNewSearch() end,
-        })
-    else
-        table.insert(item_table, {
-            text = T(_("Edit search: %1"), query),
-            deletable = false, editable = false,
-            callback = function() self:displayNewSearch(query) end,
-        })
-    end
+    -- Starting another search is the SEARCH tab's job, not a tile's: see
+    -- ereolencatalog.lua, which opens the query dialog when the tab is tapped
+    -- while search results are already showing.
 
     if #records == 0 then
         table.insert(item_table, {
@@ -312,15 +304,11 @@ function EReolenSearch:showResults(query, offset, page, label, append)
     for i = 1, #kept do table.insert(item_table, kept[i]) end
     local record_rows = kept
     for _, record in ipairs(records) do
-        local row = {
-            text = describe(record),
-            deletable = false, editable = false,
-            callback = function()
-                EReolenItem.show(self, record, function()
-                    self:showResults(query, offset, page, label)
-                end)
-            end,
-        }
+        local row = EReolenView.recordRow(record, function()
+            EReolenItem.show(self, record, function()
+                self:showResults(query, offset, page, label)
+            end)
+        end)
         table.insert(item_table, row)
         table.insert(record_rows, row)
     end
@@ -343,27 +331,24 @@ function EReolenSearch:showResults(query, offset, page, label, append)
         })
     end
 
-    table.insert(item_table, {
-        text = _("Back"),
-        deletable = false, editable = false,
-        callback = function() self:showStart() end,
-    })
-
     -- PageResult.count counts records while the indices address collections, so
     -- a page range would be a guess. The count is honest, and KOReader's own
     -- menu footer supplies "page x of y" for the rows now that the whole
     -- result set lives in one item table.
     local name = label or query
     local title = name
-    if total > 0 then
-        title = shown < total
-            and T(_("%1 — %2 of %3"), name, shown, total)
-            or T(_("%1 — %2 results"), name, total)
+    if shown > 0 then
+        -- `total` counts records and `shown` counts titles, so the two are not
+        -- comparable; say which one this is and whether there are more.
+        title = page.more
+            and T(_("%1 — %2 titles, more available"), name, shown)
+            or T(_("%1 — %2 titles"), name, shown)
     end
 
     -- A negative itemnumber tells switchItemTable to stay on the current page,
     -- which is what makes "Show more" feel like growing the list.
-    self:switchItemTable(title, item_table, append and -1 or nil)
+    self:showRecords(title, item_table, function() self:showStart() end)
+    if append then self.page = math.min(self.page, self.page_num) end
 end
 
 return EReolenSearch

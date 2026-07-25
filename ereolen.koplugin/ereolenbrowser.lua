@@ -1,11 +1,18 @@
 --[[--
-Front page of the eReolen catalog: sign in, sign out, and show which library
-card is in use.
+The front page.
+
+Laid out like the app's: the editors' shelves, each a title over a strip of
+cover art. Every one of those comes out of the cached Firebase blob, which
+carries the records *and* a cover URL for each, so the whole page draws without
+a single RPC call -- see ereolenshared.lua.
+
+Signing in and out lives here too, and is the only thing shown until there is a
+card to use.
 ]]
 
 local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
-local Menu = require("ui/widget/menu")
+local EReolenView = require("ereolenview")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
 local Screen = require("device").screen
@@ -13,10 +20,12 @@ local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
+local EReolenCovers = require("ereolencovers")
 local EReolenItem = require("ereolenitem")
+local EReolenShared = require("ereolenshared")
 local EReolenWrapper = require("ereolenwrapper")
 
-local EReolenBrowser = Menu:extend{
+local EReolenBrowser = EReolenView:extend{
     width = Screen:getWidth(),
     height = Screen:getHeight() * 0.9,
     no_title = false,
@@ -25,12 +34,15 @@ local EReolenBrowser = Menu:extend{
 
 function EReolenBrowser:init()
     self.title = _("eReolen")
-    self.title_bar_left_icon = "plus"
-    self.onLeftButtonTap = function()
-        self:addNewCatalog()
+    if EReolenWrapper:hasAccount() then
+        self.title_bar_left_icon = "star.empty"
+        self.onLeftButtonTap = function() self:showRecommendations() end
+    else
+        self.title_bar_left_icon = "plus"
+        self.onLeftButtonTap = function() self:addNewCatalog() end
     end
     self.item_table = self:genItemTable()
-    Menu.init(self) -- call parent's init()
+    EReolenView.init(self) -- call parent's init()
 end
 
 --- Accepts either a library code ("odensebib") or a display name ("Odense").
@@ -50,42 +62,73 @@ local function resolveLibraryCode(input)
     return nil
 end
 
+--- Open a front-page item. Its record has to be fetched: the blob carries
+--- enough to draw a tile, not enough for the detail view.
+function EReolenBrowser:openShelfItem(item)
+    NetworkMgr:runWhenOnline(function()
+        local record, err = EReolenWrapper:call(function(token)
+            return ereol.Item.getProduct(item.identifier, token)
+        end)
+        if not record then
+            UIManager:show(InfoMessage:new{ text = err })
+            return
+        end
+        EReolenItem.show(self, record, function() self:showStart() end)
+    end)
+end
+
 function EReolenBrowser:genItemTable()
     local item_table = {}
     local account = EReolenWrapper:getAccount()
 
-    if account and account.username then
-        local library = ereol.ApiEnv.getLibraryFromCode(account.library)
-        local library_name = library and ereol.ApiEnv.getLibraryName(library) or account.library
-        table.insert(item_table, {
-            text = T(_("Signed in as %1 (%2)"), account.username, library_name),
-            deletable = false, editable = false,
-            callback = function() self:signOut() end,
-        })
-        table.insert(item_table, {
-            text = _("Recommended for you"),
-            deletable = false, editable = false,
-            callback = function() self:showRecommendations() end,
-        })
-    else
+    if not (account and account.username) then
         table.insert(item_table, {
             text = _("Not signed in — tap to add your library card"),
             deletable = false, editable = false,
             callback = function() self:addNewCatalog() end,
+        })
+        return item_table
+    end
+
+    -- The shelves, straight from the cache. Nothing here waits on the network.
+    local shelves = EReolenShared:shelves()
+    EReolenCovers:seed(EReolenShared:coverUrls())
+    for _, shelf in ipairs(shelves) do
+        table.insert(item_table, {
+            shelf = shelf,
+            text = shelf.title,
+            deletable = false, editable = false,
+            on_item = function(item) self:openShelfItem(item) end,
+            callback = function() self:showShelf(shelf) end,
         })
     end
 
     return item_table
 end
 
+--- A whole shelf as a grid. Its items are already here, so this is instant.
+function EReolenBrowser:showShelf(shelf)
+    local item_table = {}
+    for _, item in ipairs(shelf.items) do
+        table.insert(item_table, {
+            -- No Record yet, but a cover URL and a title are enough to draw a
+            -- tile; the detail view fetches the rest when one is opened.
+            cover_url = item.cover,
+            text = item.title,
+            caption = item.creator and (item.title .. "\n" .. item.creator) or item.title,
+            subtitle = item.creator,
+            detail = item.year and item.publisher
+                and (item.year .. " · " .. item.publisher) or item.publisher,
+            deletable = false, editable = false,
+            callback = function() self:openShelfItem(item) end,
+        })
+    end
+    self:showPage(shelf.title, item_table, function() self:showStart() end)
+end
+
 --- Same contract as the other tabs, so EReolenItem can render into us.
 function EReolenBrowser:showPage(title, item_table, on_back)
-    table.insert(item_table, {
-        text = _("Back"),
-        deletable = false, editable = false,
-        callback = on_back or function() self:showStart() end,
-    })
-    self:switchItemTable(title, item_table)
+    self:showRecords(title, item_table, on_back or function() self:showStart() end)
 end
 
 function EReolenBrowser:showRecommendations()
@@ -105,6 +148,17 @@ end
 --- Back to the front page without re-running Menu.init on a live widget.
 function EReolenBrowser:showStart()
     self:switchItemTable(_("eReolen"), self:genItemTable())
+end
+
+--- Refresh the shelves from Firebase, then redraw.
+function EReolenBrowser:refreshShelves()
+    NetworkMgr:runWhenOnline(function()
+        local _data, err = EReolenShared:refresh()
+        if err then
+            UIManager:show(InfoMessage:new{ text = err })
+        end
+        self:showStart()
+    end)
 end
 
 function EReolenBrowser:refresh()
