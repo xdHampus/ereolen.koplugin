@@ -3,19 +3,15 @@ Account tab: active loans, reservations, want-to-read list, loan history and
 the library's loan quota, all from the eReolen Profile API.
 ]]
 
-local ConfirmBox = require("ui/widget/confirmbox")
-local Device = require("device")
-local DocumentRegistry = require("document/documentregistry")
 local InfoMessage = require("ui/widget/infomessage")
 local Menu = require("ui/widget/menu")
-local NetworkMgr = require("ui/network/manager")
 local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
-local logger = require("logger")
-local util = require("util")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
+local EReolenDownload = require("ereolendownload")
+local EReolenItem = require("ereolenitem")
 local EReolenWrapper = require("ereolenwrapper")
 
 local EReolenAccount = Menu:extend{
@@ -93,11 +89,11 @@ function EReolenAccount:genStartStateItemTable()
 end
 
 --- Replace the menu contents with `item_table` under `title`, plus a Back row.
-function EReolenAccount:showPage(title, item_table)
+function EReolenAccount:showPage(title, item_table, on_back)
     table.insert(item_table, {
         text = _("Back"),
         deletable = false, editable = false,
-        callback = function() self:init() end,
+        callback = on_back or function() self:init() end,
     })
     self.title = title
     self.item_table = item_table
@@ -133,72 +129,23 @@ function EReolenAccount:showLoans()
         local records = EReolenWrapper:getRecordsByIdentifier(identifiersOf(loans))
         for i = 1, #loans do
             local loan = loans[i]
-            local label = describe(records[loan.loanIdentifier.identifier], loan.loanIdentifier)
+            local record = records[loan.loanIdentifier.identifier]
+            local label = describe(record, loan.loanIdentifier)
             table.insert(item_table, {
                 text = T(_("%1 (expires %2)"), label, formatDate(loan.expireDate)),
                 deletable = false, editable = false,
-                callback = function() self:downloadLoan(loan, label) end,
+                callback = function()
+                    if record then
+                        EReolenItem.show(self, record, function() self:showLoans() end)
+                    else
+                        -- No metadata resolved; the download is still the point.
+                        EReolenDownload.loan(loan, label)
+                    end
+                end,
             })
         end
     end
     self:showPage(title, item_table)
-end
-
-function EReolenAccount:getDownloadDir()
-    return G_reader_settings:readSetting("download_dir")
-        or G_reader_settings:readSetting("lastdir")
-        or Device.home_dir
-        or "."
-end
-
---- Downloads a loan's fulfilment ticket and hands it to whatever can open it.
--- For an ebook that ticket is an Adobe ACSM: eReolen does not serve the book
--- itself, so something has to redeem the ACSM against acs.pubhub.dk. KOReader
--- has no built-in ADEPT support, so this needs a plugin that registers an
--- "acsm" document provider (acsm.koplugin does).
-function EReolenAccount:downloadLoan(loan, label)
-    local dir = self:getDownloadDir()
-    -- Strip the " — author" suffix describe() adds; keep the filename short.
-    local base = util.getSafeFilename(label:gsub(" — .*$", ""), dir)
-
-    NetworkMgr:runWhenOnline(function()
-        local vc = ereol.Item.download(dir, base, loan)
-        if not vc.success then
-            UIManager:show(InfoMessage:new{
-                text = T(_("Download failed:\n%1"), vc.message),
-            })
-            return
-        end
-
-        local path = vc.data
-        logger.dbg("eReolen: downloaded", path)
-
-        if not path:lower():match("%.acsm$") then
-            -- Audiobooks and anything the server hands over directly.
-            self:offerToOpen(path)
-            return
-        end
-
-        if not DocumentRegistry:hasProvider(path) then
-            UIManager:show(InfoMessage:new{
-                text = T(_("Saved the loan ticket to:\n%1\n\nIt is an Adobe ACSM, which KOReader cannot open on its own. Install a plugin that handles ACSM files (for example acsm.koplugin) and open the file again."), path),
-            })
-            return
-        end
-        self:offerToOpen(path)
-    end)
-end
-
-function EReolenAccount:offerToOpen(path)
-    UIManager:show(ConfirmBox:new{
-        text = T(_("Saved to:\n%1\n\nOpen it now?"), path),
-        ok_text = _("Open"),
-        cancel_text = _("Later"),
-        ok_callback = function()
-            local ReaderUI = require("apps/reader/readerui")
-            ReaderUI:showReader(path)
-        end,
-    })
 end
 
 function EReolenAccount:showReservations()
@@ -218,11 +165,14 @@ function EReolenAccount:showReservations()
         local records = EReolenWrapper:getRecordsByIdentifier(identifiersOf(reservations))
         for i = 1, #reservations do
             local reservation = reservations[i]
+            local record = records[reservation.loanIdentifier.identifier]
             table.insert(item_table, {
                 text = T(_("%1 (%2)"),
-                    describe(records[reservation.loanIdentifier.identifier], reservation.loanIdentifier),
-                    reservation.status),
+                    describe(record, reservation.loanIdentifier), reservation.status),
                 deletable = false, editable = false,
+                callback = record and function()
+                    EReolenItem.show(self, record, function() self:showReservations() end)
+                end or nil,
             })
         end
     end
@@ -246,9 +196,13 @@ function EReolenAccount:showChecklist()
         local records = EReolenWrapper:getRecordsByIdentifier(identifiersOf(checklist))
         for i = 1, #checklist do
             local entry = checklist[i]
+            local record = records[entry.loanIdentifier.identifier]
             table.insert(item_table, {
-                text = describe(records[entry.loanIdentifier.identifier], entry.loanIdentifier),
+                text = describe(record, entry.loanIdentifier),
                 deletable = false, editable = false,
+                callback = record and function()
+                    EReolenItem.show(self, record, function() self:showChecklist() end)
+                end or nil,
             })
         end
     end

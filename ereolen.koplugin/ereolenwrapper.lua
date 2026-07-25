@@ -23,6 +23,10 @@ local CODE_WRONG_CREDENTIALS = 11101
 local CODE_NO_AUTHENTICATED_USER = 12003
 local CODE_VERSION_REJECTED = 10403
 local CODE_UNAVAILABLE_FOR_ACCOUNT = 11675
+-- Observed 2026-07-25 from createLoan on a title already on loan. Notably not
+-- 10407, which is how the server rejects a malformed identifier -- so this also
+-- confirmed that createLoan accepts search-form identifiers.
+local CODE_ALREADY_LOANED = 13131
 
 local EReolenWrapper = {
     token = nil,
@@ -44,6 +48,8 @@ function EReolenWrapper:errorMessage(vc)
             ereol.ApiEnv.getAppVersion())
     elseif code == CODE_UNAVAILABLE_FOR_ACCOUNT then
         return _("This is not available for your library account.")
+    elseif code == CODE_ALREADY_LOANED then
+        return _("You have already borrowed this title.")
     end
     local message = vc.message
     if message == nil or message == "" then

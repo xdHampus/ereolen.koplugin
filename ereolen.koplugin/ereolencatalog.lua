@@ -107,7 +107,15 @@ function EReolenCatalog:init()
                 text = _("READ"),
                 width = tab_button_width,
                 margin = tab_margin,
-            },    
+                callback = function()
+                    -- "Read" is the loans list: those are the books you can open.
+                    self.active_page[1] = ereolen_account
+                    ereolen_account:showLoans()
+                    UIManager:setDirty(self, function()
+                        return "ui", self[1].dimen
+                    end)
+                end,
+            },
             Button:new{
                 text = _("ACCOUNT"),
                 width = tab_button_width,
