@@ -8,6 +8,7 @@ showPage(title, item_table, on_back) -- see EReolenAccount:showPage.
 ]]
 
 local ConfirmBox = require("ui/widget/confirmbox")
+local ImageViewer = require("ui/widget/imageviewer")
 local InfoMessage = require("ui/widget/infomessage")
 local NetworkMgr = require("ui/network/manager")
 local TextViewer = require("ui/widget/textviewer")
@@ -15,6 +16,7 @@ local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local T = require("ffi/util").template
 
+local EReolenCovers = require("ereolencovers")
 local EReolenDownload = require("ereolendownload")
 local EReolenWrapper = require("ereolenwrapper")
 
@@ -160,6 +162,25 @@ function EReolenItem.borrow(host, record, refresh)
     })
 end
 
+local function showCover(record, url)
+    NetworkMgr:runWhenOnline(function()
+        local bb, err = EReolenCovers:fetch(url)
+        if not bb then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Could not load the cover:\n%1"), err),
+            })
+            return
+        end
+        UIManager:show(ImageViewer:new{
+            image = bb,
+            image_disposable = true,  -- the viewer frees the BlitBuffer
+            fullscreen = true,
+            with_title_bar = true,
+            title_text = record.title,
+        })
+    end)
+end
+
 --- Renders `record` into `host`. `on_back` returns to whatever came before.
 function EReolenItem.show(host, record, on_back)
     local identifier = record.loanIdentifier.identifier
@@ -186,6 +207,12 @@ function EReolenItem.show(host, record, on_back)
 
     local series = joinList(dedupeNames(record.series))
     if series then row(T(_("Series: %1"), series)) end
+
+    -- Resolved up front so the row is only offered when a cover actually exists.
+    local cover_url = EReolenCovers:urlFor(identifier)
+    if cover_url then
+        row(_("Cover"), function() showCover(record, cover_url) end)
+    end
 
     local blurb = blurbOf(record)
     if blurb then
