@@ -1,73 +1,196 @@
-local BD = require("ui/bidi")
-local ButtonDialog = require("ui/widget/buttondialog")
-local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-local Cache = require("cache")
-local ConfirmBox = require("ui/widget/confirmbox")
-local DocumentRegistry = require("document/documentregistry")
-local Font = require("ui/font")
-local ImageViewer = require("ui/widget/imageviewer")
+--[[--
+Search tab: query the eReolen catalogue and open a result.
+
+Previously this built a blank ereol.Token() against a hardcoded Library.ODENSE,
+so it searched unauthenticated as the wrong library, and its own download
+dialog pointed at a sample PDF on africau.edu. Both are gone: the search runs
+through the signed-in session, and results hand off to the item view, which owns
+borrowing and downloading.
+]]
+
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
-local Menu = require("ui/widget/menu")
-local MultiInputDialog = require("ui/widget/multiinputdialog")
+local EReolenView = require("ereolenview")
 local NetworkMgr = require("ui/network/manager")
-local RenderImage = require("ui/renderimage")
 local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
-local http = require("socket.http")
-local lfs = require("libs/libkoreader-lfs")
-local logger = require("logger")
-local ltn12 = require("ltn12")
-local socket = require("socket")
-local socketutil = require("socketutil")
-local url = require("socket.url")
-local util = require("util")
 local _ = require("gettext")
 local T = require("ffi/util").template
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
-local InputDialog = require("ui/widget/inputdialog")
-local Button = require("ui/widget/button")
-local VerticalGroup = require("ui/widget/verticalgroup")
-local FrameContainer = require("ui/widget/container/framecontainer")
-local InputContainer = require("ui/widget/container/inputcontainer")
-local Blitbuffer = require("ffi/blitbuffer")
-local TextWidget = require("ui/widget/textwidget")
-local HorizontalGroup = require("ui/widget/horizontalgroup")
 
---local ffi = require("ffi")
---local lnf = require("libereolenwrapper")
---ffi.cdef[[
---void Sleep(int ms);
---int poll(struct pollfd *fds, unsigned long nfds, int timeout);
---]]
-local nl = require("libereolenwrapper")
+local EReolenItem = require("ereolenitem")
+local EReolenShared = require("ereolenshared")
+local EReolenWrapper = require("ereolenwrapper")
 
+-- How many collections to ask for at a time. A collection groups a title's
+-- ebook and audiobook editions, and it is collections the paging addresses, not
+-- records.
+--
+-- Note what the two QuerySettings fields actually mean, verified against the
+-- live API 2026-07-25: startIndex is an offset, but **endIndex is a count, not
+-- an end offset**, and it is capped at 200 -- 250 comes back as an HTTP error.
+-- The old code set endIndex = offset + PAGE_SIZE, so every page was larger than
+-- the one before it (page 2 fetched 40 collections, page 3 sixty...) and past
+-- offset 200 the request simply failed.
+--
+-- 100 is a compromise: about 180 records and ~3s on a Kobo, and enough that
+-- most searches need no second request at all.
+local PAGE_COLLECTIONS = 100
 
-local EReolenSearch = Menu:extend{
-    search_template_type = "application/atom%+xml",
-    acquisition_rel = "^http://opds%-spec%.org/acquisition",
-    image_rel = "http://opds-spec.org/image",
-    thumbnail_rel = "http://opds-spec.org/image/thumbnail",
-    stream_rel = "http://vaemendis.net/opds-pse/stream",
-
+local EReolenSearch = EReolenView:extend{
     width = Screen:getWidth(),
     height = Screen:getHeight() * 0.9,
     no_title = false,
     parent = nil,
 }
 
-
-
 function EReolenSearch:init()
-    self.catalog_title = nil
+    self.title = _("Search")
     self.title_bar_left_icon = nil
     self.item_table = self:genStartStateItemTable()
-    Menu.init(self) -- call parent's init()
+    self:setupViewToggle()
+    EReolenView.init(self) -- call parent's init()
+end
+
+--- Same contract as EReolenAccount:showPage, so EReolenItem can render into us.
+--- Back to the search root without re-running Menu.init on a live widget.
+function EReolenSearch:showStart()
+    self:switchItemTable(_("Search"), self:genStartStateItemTable())
+end
+
+function EReolenSearch:showPage(title, item_table, on_back)
+    self:showRecords(title, item_table, on_back or function() self:showStart() end)
+end
+
+function EReolenSearch:genStartStateItemTable()
+    local item_table = {}
+    table.insert(item_table, {
+        text = _("New search"),
+        deletable = false, editable = false,
+        callback = function() self:displayNewSearch() end,
+    })
+    if self.last_query then
+        table.insert(item_table, {
+            text = T(_("Again: %1"), self.last_label or self.last_query),
+            deletable = false, editable = false,
+            callback = function() self:runSearch(self.last_query, 0, self.last_label) end,
+        })
+    end
+    table.insert(item_table, {
+        text = _("Browse categories"),
+        deletable = false, editable = false,
+        callback = function() self:showCategories() end,
+    })
+    return item_table
+end
+
+--- Search typeahead. getSuggestions needs no session, so this works signed out.
+function EReolenSearch:showSuggestions(prefix)
+    if prefix == nil or prefix == "" then
+        UIManager:show(InfoMessage:new{ text = _("Type something to get suggestions for.") })
+        return
+    end
+    NetworkMgr:runWhenOnline(function()
+        local suggestions, err = EReolenWrapper:call(function(token)
+            return ereol.Item.getSuggestions(prefix, token)
+        end)
+        if not suggestions then
+            UIManager:show(InfoMessage:new{ text = err })
+            return
+        end
+
+        local item_table = {}
+        if #suggestions == 0 then
+            table.insert(item_table, {
+                text = _("No suggestions"),
+                deletable = false, editable = false,
+            })
+        end
+        local seen = {}
+        for _, suggestion in ipairs(suggestions) do
+            local text = suggestion.suggestion
+            if text ~= "" and not seen[text] then
+                seen[text] = true
+                table.insert(item_table, {
+                    text = text,
+                    deletable = false, editable = false,
+                    callback = function() self:runSearch(text, 0) end,
+                })
+            end
+        end
+        self:showPage(T(_("Suggestions for “%1”"), prefix), item_table)
+    end)
+end
+
+--- The app's curated categories, from Firebase rather than the RPC API.
+function EReolenSearch:showCategories()
+    NetworkMgr:runWhenOnline(function()
+        local data, err = EReolenShared:refresh()
+        if not data then
+            UIManager:show(InfoMessage:new{
+                text = T(_("Could not load the categories:\n%1"), err),
+            })
+            return
+        end
+
+        local item_table = {}
+        -- Not `for _, category`: that shadows gettext's _ inside the loop.
+        for i = 1, #data.categories do
+            local category = data.categories[i]
+            -- Each category ships a representative cover, so this draws as a
+            -- grid of pictures rather than a wall of Danish nouns.
+            table.insert(item_table, {
+                cover_url = category.cover,
+                text = category.title,
+                caption = category.count
+                    and (category.title .. "\n" .. T(_("%1 titles"), category.count))
+                    or category.title,
+                subtitle = category.count and T(_("%1 titles"), category.count) or nil,
+                deletable = false, editable = false,
+                callback = function() self:showCategory(category) end,
+            })
+        end
+        self:showPage(_("Categories"), item_table)
+    end)
+end
+
+--- One category: its own query plus whichever shelves are CQL-backed.
+function EReolenSearch:showCategory(category)
+    local back = function() self:showCategories() end
+    local item_table = {}
+
+    if category.query then
+        table.insert(item_table, {
+            text = T(_("Everything in %1"), category.title),
+            deletable = false, editable = false,
+            callback = function() self:runSearch(category.query, 0, category.title) end,
+        })
+    end
+
+    -- Not `for _, shelf`: the loop variable would shadow gettext's _, and the
+    -- fallback below calls it. compact() leaves title nil for an unnamed shelf,
+    -- so that path is reachable.
+    for i = 1, #(category.shelves or {}) do
+        local shelf = category.shelves[i]
+        local title = shelf.title or _("Untitled shelf")
+        table.insert(item_table, {
+            text = title,
+            deletable = false, editable = false,
+            callback = function() self:runSearch(shelf.query, 0, title) end,
+        })
+    end
+
+    if #item_table == 0 then
+        table.insert(item_table, {
+            text = _("Nothing browsable in this category yet"),
+            deletable = false, editable = false,
+        })
+    end
+    self:showPage(category.title, item_table, back)
 end
 
 function EReolenSearch:displayNewSearch(default_text)
     self.search_input = InputDialog:new{
-        title = _("Search"),
+        title = _("Search eReolen"),
         input = default_text,
         show_parent = self,
         input_hint = _("Search query"),
@@ -83,12 +206,22 @@ function EReolenSearch:displayNewSearch(default_text)
                     end,
                 },
                 {
+                    text = _("Suggest"),
+                    callback = function()
+                        local prefix = self.search_input:getInputText()
+                        self.search_input:onClose()
+                        UIManager:close(self.search_input)
+                        self:showSuggestions(prefix)
+                    end,
+                },
+                {
                     text = _("Search"),
                     is_enter_default = true,
                     callback = function()
-                        self:newSearch(self.search_input:getInputText())
+                        local query = self.search_input:getInputText()
                         self.search_input:onClose()
                         UIManager:close(self.search_input)
+                        self:runSearch(query, 0)
                     end,
                 },
             }
@@ -99,350 +232,134 @@ function EReolenSearch:displayNewSearch(default_text)
     self.search_input:onShowKeyboard()
 end
 
-function EReolenSearch:genStartStateItemTable()
+--- One Record per collection.
+-- PageResult.data groups a title's editions together, so flattening it put the
+-- same book on screen two or three times over -- "Vejen til Wigan Pier" as
+-- ebook and as audiobook, side by side. Take the first of each and let the item
+-- view's "Other formats of this title" row reach the rest. An ebook is the
+-- better default on an e-reader, so prefer one when the collection has both.
+local function flattenResults(page)
+    local records = {}
+    for _, collection in ipairs(page.data or {}) do
+        local pick = collection[1]
+        for _, record in ipairs(collection) do
+            if record.recordType == "ebook" then pick = record break end
+        end
+        if pick then table.insert(records, pick) end
+    end
+    return records
+end
+
+local function describe(record)
+    local label = record.title
+    if record.creators and record.creators[1] then
+        label = T("%1 — %2", label, record.creators[1])
+    end
+    if record.recordType then
+        label = T("%1 (%2)", label, record.recordType)
+    end
+    return label
+end
+
+--- `offset` is a collection offset. `append` keeps what is already on screen
+-- and adds to it, which is what the "Show more" row at the end does.
+function EReolenSearch:runSearch(query, offset, label, append)
+    if query == nil or query == "" then return end
+    self.last_query = query
+    self.last_label = label
+
+    NetworkMgr:runWhenOnline(function()
+        local settings = ereol.QuerySettings()
+        settings.startIndex = offset
+        settings.endIndex = PAGE_COLLECTIONS -- a count, not an end offset
+
+        local page, err = EReolenWrapper:call(function(token)
+            return ereol.Item.search(query, token, settings)
+        end)
+        if not page then
+            UIManager:show(InfoMessage:new{ text = err })
+            return
+        end
+
+        self:showResults(query, offset, page, label, append)
+    end)
+end
+
+function EReolenSearch:showResults(query, offset, page, label, append)
+    local records = flattenResults(page)
     local item_table = {}
-    table.insert(item_table, {
-        text = "New search",
-        deletable = false, editable = false,
-        callback = function() self:displayNewSearch() end,
-    })
-    table.insert(item_table, {
-        text = "Categories",
-        deletable = false, editable = false,
-    })
-    table.insert(item_table, {
-        text = "Themes",
-        deletable = false, editable = false,
-    })
-    return item_table
-end
+    -- Rows are rebuilt from scratch each time; only the accumulated record rows
+    -- carry over, so the header and footer are never duplicated.
+    local kept = (append and self.result_rows) or {}
+    local shown_before = #kept
 
-function EReolenSearch:newSearch(searchQuery)
-    local item_table = {}
-    table.insert(item_table, {
-        text = "Edit search: "..searchQuery,
-        deletable = false, editable = false,
-        callback = function() self:displayNewSearch(searchQuery) end,
-    })
-    table.insert(item_table, {
-        text = "Back",
-        deletable = false, editable = false,
-        --callback = function() self:init() end
-    })
-  
-    local t = ereol.Token()
-    t.library = ereol.Library.ODENSE
-    --print(t.library)
+    -- Starting another search is the SEARCH tab's job, not a tile's: see
+    -- ereolencatalog.lua, which opens the query dialog when the tab is tapped
+    -- while search results are already showing.
 
-
-    local vc = ereol.Item.search(searchQuery, t, ereol.QuerySettings())
-    
-    --print(vc.message)
-    --print(vc.success)
-    --print(vc.detailedMessage)
-    if vc.success and (vc.data ~= nil) then
-        --print(vc.data.count)
-        --print(vc.data.more)
-        for _,resultEntries in ipairs(vc.data.data) do
-            for _,entry in ipairs(resultEntries) do
-                --[[
-
-                print("Title:   \t"..entry.title)
-                print("Record type:\t"..entry.recordType)
-                print("Abstract:\t"..entry.abstract)
-                print("Description:\t"..entry.description)
-                print("\n")
-                ]]--                
-                
-                if entry.recordType == "ebook" then
-                    table.insert(item_table, {
-                        text = entry.title.." - "..entry.recordType,
-                        deletable = false, editable = false,
-                        callback = function() self:viewSearchEntry(entry) end,
-                    })
-                end
-            end
-        end
-    end
-  
-    self:newSearchInit(item_table)
-end
-
-function EReolenSearch:newSearchInit(item_table)
-    self.item_table = item_table
-    self.close_callback = function()
-        self.has_close_button = false
-        --self.close_callback = nil
-        self.onLeftButtonTap = nil
-        --self:init()
-    end
-    self.title_bar_left_icon = "appbar.menu"
-    self.has_close_button = true
-    self.onLeftButtonTap = function()
-        self:changeSearchFilters()
-    end
-    Menu.init(self)
-end
-
-
--- Shows dialog to download / stream a book
-function EReolenSearch:viewSearchEntry(item)
-    local acquisitions = {}
-    table.insert(acquisitions, {
-        type  = "application/pdf",
-        href  = "https://www.africau.edu/images/default/sample.pdf",
-        title = "pdf",
-        count = 1,
-    })
-
-    local filename = item.title
-    if item.creators[0] then
-        filename = item.creators[0] .. " - " .. filename
-    end
-    local filename_orig = filename
-
-    local function createTitle(path, file) -- title for ButtonDialogTitle
-        return T(_("Download folder:\n%1\n\nDownload filename:\n%2\n\nDownload file type:"),
-            BD.dirpath(path), file)
-    end
-
-    local buttons = {} -- buttons for ButtonDialogTitle
-    local stream_buttons -- page stream buttons
-    local download_buttons = {} -- file type download buttons
-    
-    for i, acquisition in ipairs(acquisitions) do -- filter out unsupported file types
-        local filetype = util.getFileNameSuffix(acquisition.href)
-        logger.dbg("Filetype for download is", filetype)
-        if not DocumentRegistry:hasProvider("dummy." .. filetype) then
-            filetype = nil
-        end
-        if not filetype and DocumentRegistry:hasProvider(nil, acquisition.type) then
-            filetype = DocumentRegistry:mimeToExt(acquisition.type)
-        end
-        if filetype then -- supported file type
-            local text = url.unescape(acquisition.title or string.upper(filetype))
-            table.insert(download_buttons, {
-                text = text .. "\u{2B07}", -- append DOWNWARDS BLACK ARROW
-                callback = function()
-                    self:downloadFile(filename .. "." .. string.lower(filetype), acquisition.href)
-                    UIManager:close(self.download_dialog)
-                end,
+    if #records == 0 then
+        table.insert(item_table, {
+            text = _("No results"),
+            deletable = false, editable = false,
+        })
+        -- A typed query that found nothing is exactly when suggestions help.
+        if not label then
+            table.insert(item_table, {
+                text = T(_("Suggestions for “%1”"), query),
+                deletable = false, editable = false,
+                callback = function() self:showSuggestions(query) end,
             })
         end
     end
-    
 
-    local buttons_nb = #download_buttons
-    if buttons_nb > 0 then
-        if buttons_nb == 1 then -- one wide button
-            table.insert(buttons, download_buttons)
-        else
-            if buttons_nb % 2 == 1 then -- we need even number of buttons
-                table.insert(download_buttons, {text = ""})
-            end
-            for i = 1, buttons_nb, 2 do -- two buttons in a row
-                table.insert(buttons, {download_buttons[i], download_buttons[i+1]})
-            end
-        end
-        table.insert(buttons, {}) -- separator
-    end
-    if stream_buttons then
-        table.insert(buttons, stream_buttons)
-        table.insert(buttons, {}) -- separator
-    end
-    table.insert(buttons, { -- action buttons
-        {
-            text = _("Choose folder"),
-            callback = function()
-                require("ui/downloadmgr"):new{
-                    onConfirm = function(path)
-                        logger.dbg("Download folder set to", path)
-                        G_reader_settings:saveSetting("download_dir", path)
-                        self.download_dialog:setTitle(createTitle(path, filename))
-                    end,
-                }:chooseDir(self.getCurrentDownloadDir())
-            end,
-        },
-        {
-            text = _("Change filename"),
-            callback = function()
-                local dialog
-                dialog = InputDialog:new{
-                    title = _("Enter filename"),
-                    input = filename,
-                    input_hint = filename_orig,
-                    buttons = {
-                        {
-                            {
-                                text = _("Cancel"),
-                                id = "close",
-                                callback = function()
-                                    UIManager:close(dialog)
-                                end,
-                            },
-                            {
-                                text = _("Set filename"),
-                                is_enter_default = true,
-                                callback = function()
-                                    filename = dialog:getInputValue()
-                                    if filename == "" then
-                                        filename = filename_orig
-                                    end
-                                    UIManager:close(dialog)
-                                    self.download_dialog:setTitle(createTitle(self.getCurrentDownloadDir(), filename))
-                                end,
-                            },
-                        }
-                    },
-                }
-                UIManager:show(dialog)
-                dialog:onShowKeyboard()
-            end,
-        },
-    })
-    table.insert(buttons, {
-        {
-            text = _("Cancel"),
-            callback = function()
-                UIManager:close(self.download_dialog)
-            end,
-        },
-        {
-            text = _("Book information"),
-            enabled = true,
-            callback = function()
-                local TextViewer = require("ui/widget/textviewer")
-                UIManager:show(TextViewer:new{
-                    title = item.title,
-                    title_multilines = true,
-                    text = self.entryItemToPlainText(item),
-                    text_face = Font:getFace("x_smallinfofont", G_reader_settings:readSetting("items_font_size")),
-                })
-            end,
-        },
-    })
-
-    self.download_dialog = ButtonDialogTitle:new{
-        title = createTitle(self.getCurrentDownloadDir(), filename),
-        buttons = buttons,
-    }
-    UIManager:show(self.download_dialog)
-end
-
-
-function EReolenSearch.entryItemToPlainText(item)
-    return util.htmlToPlainTextIfHtml(
-        "Title: "..item.title
-        .."<br>Publisher:"..item.publisher
-        .."<br>Language:"..item.language
-        .."<br>Media Type:"..item.mediaType
-        ..((item.year == nil) and "" or ("<br>Year:"..item.year))
-        ..((item.seriesPart == nil) and "" or ("<br>Series:"..item.seriesPart))
-        ..((item.edition == nil) and "" or ("<br>Edition:"..item.edition))
-        .."<br><br>Description:<br>"..item.description
-        ..((item.firstPublished == nil) and "" or ("<br>First Published:"..item.firstPublished))
-        ..((item.abstract == nil) and "" or ("<br><br>Abstract:<br>"..item.abstract.."<br>"))
-    )
-end
-
--- Downloads a book (with "File already exists" dialog)
-function EReolenSearch:downloadFile(filename, remote_url)
-    local download_dir = self.getCurrentDownloadDir()
-
-    filename = util.getSafeFilename(filename, download_dir)
-    local local_path = (download_dir ~= "/" and download_dir or "") .. '/' .. filename
-    local_path = util.fixUtf8(local_path, "_")
-
-    local function download()
-        UIManager:scheduleIn(1, function()
-            logger.dbg("Downloading file", local_path, "from", remote_url)
-            local parsed = url.parse(remote_url)
-
-            local code, headers, status
-            if parsed.scheme == "http" or parsed.scheme == "https" then
-                socketutil:set_timeout(socketutil.FILE_BLOCK_TIMEOUT, socketutil.FILE_TOTAL_TIMEOUT)
-                code, headers, status = socket.skip(1, http.request {
-                    url      = remote_url,
-                    headers  = {
-                        ["Accept-Encoding"] = "identity",
-                    },
-                    sink     = ltn12.sink.file(io.open(local_path, "w")),
-                    user     = self.root_catalog_username,
-                    password = self.root_catalog_password,
-                })
-                socketutil:reset_timeout()
-            else
-                UIManager:show(InfoMessage:new {
-                    text = T(_("Invalid protocol:\n%1"), parsed.scheme),
-                })
-            end
-
-            if code == 200 then
-                logger.dbg("File downloaded to", local_path)
-                self:fileDownloadedCallback(local_path)
-            elseif code == 302 and remote_url:match("^https") and headers.location:match("^http[^s]") then
-                util.removeFile(local_path)
-                UIManager:show(InfoMessage:new{
-                    text = T(_("Insecure HTTPS → HTTP downgrade attempted by redirect from:\n\n'%1'\n\nto\n\n'%2'.\n\nPlease inform the server administrator that many clients disallow this because it could be a downgrade attack."), BD.url(remote_url), BD.url(headers.location)),
-                    icon = "notice-warning",
-                })
-            else
-                util.removeFile(local_path)
-                logger.dbg("OPDSBrowser:downloadFile: Request failed:", status or code)
-                logger.dbg("OPDSBrowser:downloadFile: Response headers:", headers)
-                UIManager:show(InfoMessage:new {
-                    text = T(_("Could not save file to:\n%1\n%2"),
-                        BD.filepath(local_path),
-                        status or code or "network unreachable"),
-                })
-            end
+    for i = 1, #kept do table.insert(item_table, kept[i]) end
+    local record_rows = kept
+    for _, record in ipairs(records) do
+        local row = EReolenView.recordRow(record, function()
+            EReolenItem.show(self, record, function()
+                self:showResults(query, offset, page, label)
+            end)
         end)
+        table.insert(item_table, row)
+        table.insert(record_rows, row)
+    end
 
-        UIManager:show(InfoMessage:new{
-            text = _("Downloading may take several minutes…"),
-            timeout = 1,
+    -- Remember only the record rows, so a later "Show more" extends the list
+    -- instead of re-adding the header and footer.
+    self.result_rows = record_rows
+
+    local total = page.count or 0
+    local shown = #records + shown_before
+
+    if page.more then
+        -- Advance by the collections actually returned: near the end of a
+        -- result set the server hands back fewer than were asked for.
+        local next_offset = offset + #page.data
+        table.insert(item_table, {
+            text = T(_("Show more (%1 of %2 shown)"), shown, total),
+            deletable = false, editable = false,
+            callback = function() self:runSearch(query, next_offset, label, true) end,
         })
     end
 
-    if lfs.attributes(local_path) then
-        UIManager:show(ConfirmBox:new{
-            text = T(_("The file %1 already exists. Do you want to overwrite it?"), BD.filepath(local_path)),
-            ok_text = _("Overwrite"),
-            ok_callback = function()
-                download()
-            end,
-        })
-    else
-        download()
+    -- PageResult.count counts records while the indices address collections, so
+    -- a page range would be a guess. The count is honest, and KOReader's own
+    -- menu footer supplies "page x of y" for the rows now that the whole
+    -- result set lives in one item table.
+    local name = label or query
+    local title = name
+    if shown > 0 then
+        -- `total` counts records and `shown` counts titles, so the two are not
+        -- comparable; say which one this is and whether there are more.
+        title = page.more
+            and T(_("%1 — %2 titles, more available"), name, shown)
+            or T(_("%1 — %2 titles"), name, shown)
     end
+
+    -- A negative itemnumber tells switchItemTable to stay on the current page,
+    -- which is what makes "Show more" feel like growing the list.
+    self:showRecords(title, item_table, function() self:showStart() end)
+    if append then self.page = math.min(self.page, self.page_num) end
 end
-
--- Returns user selected or last opened folder
-function EReolenSearch.getCurrentDownloadDir()
-    return G_reader_settings:readSetting("download_dir") or G_reader_settings:readSetting("lastdir")
-end
-
-function EReolenSearch:fileDownloadedCallback(downloaded_file)
-    UIManager:show(ConfirmBox:new{
-        text = T(_("File saved to:\n%1\nWould you like to read the downloaded book now?"),
-                    BD.filepath(downloaded_file)),
-        ok_text = _("Read now"),
-        cancel_text = _("Read later"),
-        ok_callback = function()
-            local Event = require("ui/event")
-            UIManager:broadcastEvent(Event:new("SetupShowReader"))
-
-            self:onClose()
-
-            local ReaderUI = require("apps/reader/readerui")
-            ReaderUI:showReader(downloaded_file)
-        end
-    })
-end
-
-
-function EReolenSearch:changeSearchFilters()
-end
-
 
 return EReolenSearch

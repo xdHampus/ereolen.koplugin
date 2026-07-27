@@ -1,6 +1,4 @@
-local BD = require("ui/bidi")
 local Blitbuffer = require("ffi/blitbuffer")
-local ConfirmBox = require("ui/widget/confirmbox")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local InputContainer = require("ui/widget/container/inputcontainer")
 
@@ -11,10 +9,8 @@ local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local _ = require("gettext")
 local Screen = require("device").screen
-local T = require("ffi/util").template
-local Button = require("ui/widget/button")
+local EReolenNavBar = require("ereolennavbar")
 
-local EReolenWrapper = require("ereolenwrapper")
 local EReolenBrowser = require("ereolenbrowser")
 local EReolenSearch =require("ereolensearch")
 local EReolenAccount =require("ereolenaccount")
@@ -30,24 +26,10 @@ function EReolenCatalog:init()
         is_popout = false,
         is_borderless = true,
         has_close_button = false,
-        close_callback = function() return self:onClose() end,
-        file_downloaded_callback = function(downloaded_file)
-            UIManager:show(ConfirmBox:new{
-                text = T(_("File saved to:\n%1\nWould you like to read the downloaded book now?"),
-                    BD.filepath(downloaded_file)),
-                ok_text = _("Read now"),
-                cancel_text = _("Read later"),
-                ok_callback = function()
-                    local Event = require("ui/event")
-                    UIManager:broadcastEvent(Event:new("SetupShowReader"))
-
-                    self:onClose()
-
-                    local ReaderUI = require("apps/reader/readerui")
-                    ReaderUI:showReader(downloaded_file)
-                end
-            })
-        end
+        -- No close_callback here. Menu:onMenuSelect calls it after *every* leaf
+        -- row's callback, so wiring it to onClose meant tapping any front-page
+        -- row tore the whole catalog down -- the list loaded and the window
+        -- vanished with no error. The CLOSE tab below is the way out.
     }
     local ereolen_search = EReolenSearch:new{
         title = "Search",
@@ -66,63 +48,62 @@ function EReolenCatalog:init()
     self.active_page = FrameContainer:new{
         padding = 0,
         bordersize = 0,
-        height = Screen:getHeight() * 0.9,
+        height = Screen:getHeight() - math.floor(Screen:getHeight() * 0.085),
         width = Screen:getWidth(),
         background = Blitbuffer.COLOR_WHITE,
     }
-    self.bottom_tab = FrameContainer:new{
-        padding = 0,
-        bordersize = 0,
-        height = Screen:getHeight() * 0.1,
-        width = Screen:getWidth(),
-        background = Blitbuffer.COLOR_WHITE,
-        HorizontalGroup:new{
-            Button:new{
-                text = _("FRONT"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
+    local function switchTo(id, widget, before)
+        self.active_page[1] = widget
+        if before then before() end
+        self.nav_bar:setActive(id)
+        UIManager:setDirty(self, function()
+            return "ui", self[1].dimen
+        end)
+    end
+
+    self.nav_bar = EReolenNavBar:new{
+        show_parent = self,
+        tabs = {
+            {
+                id = "front", label = _("Front"), icon = "home",
+                callback = function() switchTo("front", ereolen_browser) end,
+            },
+            {
+                id = "search", label = _("Search"), icon = "appbar.search",
                 callback = function()
-                    self.active_page[1] = ereolen_browser
-                    UIManager:setDirty(self, function()
-                        return "ui", self[1].dimen
+                    -- Tapping Search while already on it means "search for
+                    -- something else", which is why results carry no edit row.
+                    if self.active_page[1] == ereolen_search then
+                        ereolen_search:displayNewSearch(ereolen_search.last_query)
+                        return
+                    end
+                    switchTo("search", ereolen_search)
+                end,
+            },
+            {
+                id = "read", label = _("Read"), icon = "book.opened",
+                callback = function()
+                    -- "Read" is the loans list: those are the books you can open.
+                    switchTo("read", ereolen_account, function()
+                        ereolen_account:showLoans()
                     end)
                 end,
-            },    
-            Button:new{
-                text = _("SEARCH"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
+            },
+            {
+                id = "account", label = _("Account"), icon = "appbar.settings",
                 callback = function()
-                    self.active_page[1] = ereolen_search
-                    UIManager:setDirty(self, function()
-                        return "ui", self[1].dimen
+                    switchTo("account", ereolen_account, function()
+                        ereolen_account:showStart()
                     end)
                 end,
-            },    
-            Button:new{
-                text = _("READ"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
-            },    
-            Button:new{
-                text = _("ACCOUNT"),
-                width = Screen:getWidth() / 5,
-                margin = 2,
-                callback = function()
-                    self.active_page[1] = ereolen_account
-                    UIManager:setDirty(self, function()
-                        return "ui", self[1].dimen
-                    end)
-                end,
-            },   
-            Button:new{
-                text = _("Q"),
-                width = Screen:getWidth() / (5*10),
-                margin = 4,
+            },
+            {
+                id = "close", label = _("Close"), icon = "exit",
                 callback = function() return self:onClose() end,
-            },    
+            },
         },
     }
+
     self.active_page[1] = ereolen_browser
     self[1] = FrameContainer:new{
         padding = 0,
@@ -130,14 +111,13 @@ function EReolenCatalog:init()
         background = Blitbuffer.COLOR_WHITE,
         VerticalGroup:new{
             self.active_page,
-            self.bottom_tab,
+            self.nav_bar,
         },
     }
     
 end
 
 function EReolenCatalog:onShow()
-    EReolenWrapper:parse()
     UIManager:setDirty(self, function()
         return "ui", self[1].dimen
     end)
@@ -151,14 +131,21 @@ end
 
 function EReolenCatalog:showCatalog()
     logger.dbg("show eReolen catalog")
-    UIManager:show(EReolenCatalog:new{
+    local catalog = EReolenCatalog:new{
         dimen = Screen:getSize(),
         covers_fullscreen = true, -- hint for UIManager:_repaint()
-    })
+    }
+    -- ereolendownload needs to get this window out of the way before handing a
+    -- file to the reader or to the ACSM provider.
+    EReolenCatalog.instance = catalog
+    UIManager:show(catalog)
 end
 
 function EReolenCatalog:onClose()
     logger.dbg("close eReolen catalog")
+    if EReolenCatalog.instance == self then
+        EReolenCatalog.instance = nil
+    end
     UIManager:close(self)
     return true
 end
