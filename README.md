@@ -34,7 +34,8 @@ greyscale e-reader the covers are, of course, grey.</sub>
   plugin that registers a provider for `.acsm` will do. Audiobooks are a direct
   download and need nothing extra.
 
-Tested against KOReader 2026.03 on a Kobo and 2026.07 on the desktop emulator.
+The Kobo build targets KOReader 2026.03; the screenshots above are 2026.07 on
+the desktop.
 
 ## Install
 
@@ -55,8 +56,9 @@ nix build
 cp -rL result/ereolen.koplugin ~/.config/koreader/plugins/
 ```
 
-Then restart KOReader and open **☰ → 🔍 → eReolen catalog**. The first run asks
-for your library, card number and PIN; they are stored in KOReader's settings.
+Then restart KOReader and open the main menu → the search tab → **eReolen
+catalog**. The first run asks for your library, card number and PIN; they are
+stored in KOReader's settings.
 
 ## How it is put together
 
@@ -71,9 +73,10 @@ refreshed only when its generation changes.
 
 ## Known gaps
 
-- **The front page is empty until you visit Search → Browse categories once.**
-  That is what populates the shared-content cache; nothing else does, and there
-  is no way to force a refresh.
+- **The front page is empty on a fresh install.** Search → Browse categories is
+  the only thing that populates the shared-content cache, and the Front tab only
+  picks it up the next time the catalog is opened. There is no way to force a
+  refresh.
 - Reservations and loan history are plain lists, not the cover grid the rest of
   the app uses.
 - Removing a title from loan history is not wired up.
