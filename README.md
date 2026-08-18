@@ -5,10 +5,12 @@ libraries' e-book service — without leaving KOReader.
 
 |  |  |
 |---|---|
-| ![Front page](docs/screenshots/front-page.png) | ![Search results](docs/screenshots/search-results.png) |
-| The front page, with the same editorial shelves the eReolen app shows. | Search results, cover-first. |
-| ![Title](docs/screenshots/title.png) | ![Loans](docs/screenshots/loans.png) |
-| A title: blurb, availability, and the ways into related books. | Your loans, with return dates. |
+| ![Front page](docs/screenshots/front-page.png) | ![Categories](docs/screenshots/categories.png) |
+| The front page, with the same editorial shelves the eReolen app shows. | The curated categories, with what each one holds. |
+| ![Search results](docs/screenshots/search-results.png) | ![Title](docs/screenshots/title.png) |
+| Search results, cover-first. | A title: blurb, availability, and the ways into related books. |
+| ![Loans](docs/screenshots/loans.png) | ![Account](docs/screenshots/account.png) |
+| Your loans, with return dates. | And the rest of the account. |
 
 <sub>Screenshots from the KOReader desktop emulator at Kobo Libra geometry. On a
 greyscale e-reader the covers are, of course, grey.</sub>
